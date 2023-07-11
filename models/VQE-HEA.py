@@ -54,7 +54,6 @@ class VQE:
         self.params = self.circuit.parameters
         self.estimator = Estimator()
         self.loss_history = []
-        # self.device = 'cpu'
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
     
