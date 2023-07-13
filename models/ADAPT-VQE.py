@@ -2,7 +2,7 @@ import qiskit
 from qiskit import QuantumCircuit, QuantumRegister
 import torch
 import torch.nn as nn
-from torch.optim import Adam, LBFGS
+from torch.optim import Adam
 import openfermion as of
 import numpy as np
 from openfermion import (
@@ -147,7 +147,6 @@ class AdaptVQE:
                 self.operator_id.append(max_grad_index)
                 isAppend = True
 
-            self.operator_id.append(max_grad_index)
             print(f'==== Found maximium gradient {np.abs(max_grad)} at index {max_grad_index} ====')
 
             # termiate the Adapt-VQE if the largest gradient is less than the threshold
@@ -165,8 +164,9 @@ class AdaptVQE:
                 self.updateAnsatz(newTheta, operator)
 
             # update the model parameter
-            model = self.construct_qnn(self.pauliHamiltonian)
-            optimizer = Adam(model.parameters(), lr=self.lr * np.exp(-0.1 * i), betas=(0.7, 0.999), weight_decay=5e-4)
+            if isAppend:
+                model = self.construct_qnn(self.pauliHamiltonian)
+                optimizer = Adam(model.parameters(), lr=self.lr * np.exp(-0.1 * i), betas=(0.7, 0.999), weight_decay=5e-4)
             optimizer.zero_grad()
             loss = model(torch.Tensor([]))
             loss.backward()
@@ -183,7 +183,7 @@ class AdaptVQE:
         self.plot_training_result()
 
     def plot_training_result(self):
-
+        
         plt.title('Energy-Iteration plot')
         plt.ylabel('Energy')
         plt.xlabel('Iteration')
@@ -202,7 +202,7 @@ class AdaptVQE:
     def loadModel(self):
         pass
 
-from molecules import H2
+from molecules import *
 from operatorPools.fermion_pool import Fermionic_Pool
 import matplotlib.pyplot as plt
 
