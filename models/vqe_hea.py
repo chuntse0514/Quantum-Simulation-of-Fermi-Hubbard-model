@@ -9,14 +9,12 @@ from openfermion import (
 )
 from .utils import (
     QubitOperator_to_SparsePauliOp,
-    prepare_HF_state,
 )
 from qiskit.primitives import Estimator
 from qiskit_machine_learning.connectors import TorchConnector
 from qiskit_machine_learning.neural_networks import EstimatorQNN
 from qiskit.circuit.library import EfficientSU2
 from qiskit.utils import algorithm_globals
-from molecules import *
 import matplotlib.pyplot as plt
 import time
 
@@ -42,7 +40,6 @@ class VQE:
         self.qubitHamiltonian = jordan_wigner(self.fermionicHamiltonian)
         self.pauliHamiltonian = QubitOperator_to_SparsePauliOp(self.qubitHamiltonian, self.n_qubits)
 
-        hf_circ = prepare_HF_state(self.n_electrons, self.n_qubits)
         self.circuit = EfficientSU2(
             num_qubits=self.n_qubits,
             su2_gates=['rz', 'ry', 'rz'],
@@ -50,7 +47,11 @@ class VQE:
             insert_barriers=True,
             reps=5,
         )
-        self.circuit = hf_circ.compose(self.circuit)
+        hf_circuit = QuantumCircuit(self.n_qubits)
+        for i in range(self.n_electrons):
+            hf_circuit.x(i)
+
+        self.circuit = hf_circuit.compose(self.circuit)
         self.params = self.circuit.parameters
         self.estimator = Estimator()
         self.loss_history = []
@@ -111,10 +112,10 @@ class VQE:
 
         plt.show()
         
-    
-def test_VQE():
+if __name__ == '__main__':
+
+    from molecules import *
+
     molecule = H2(r=0.8)
     vqe = VQE(molecule, maxIter=100, lr=1e-2, epsilon=0.002)
     vqe.run()
-
-test_VQE()

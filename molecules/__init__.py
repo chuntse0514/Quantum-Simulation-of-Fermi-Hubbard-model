@@ -58,5 +58,3 @@ def test_molecule():
     # print(molecule.two_body_integrals)
 
     # print(of.get_sparse_operator(molecule.get_molecular_hamiltonian()))
-
-test_molecule()
