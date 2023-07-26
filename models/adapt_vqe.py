@@ -67,6 +67,9 @@ class AdaptVQE:
         qnn = self.construct_qnn(commutators)
         return qnn(torch.Tensor([])).detach().numpy()
 
+    # Subroutine selectOperator() should not be written such that it needs to re-calculate calculatePoolElementGradient() for every loop in the in maxIter.
+    # calculatePoolElementGradient() should be calculated once at the start of vqe.run(), and stored for accessing during every loop of maxIter,
+    # and all maxgrad operators previously chosen should be skipped in the selectOperator().
     def selectOperator(self):
         gradients = self.calculatePoolElementGradient()
         # print(np.round(gradients, decimals=3))
