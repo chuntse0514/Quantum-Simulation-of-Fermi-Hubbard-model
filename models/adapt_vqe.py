@@ -79,7 +79,7 @@ class AdaptVQE:
         """
         Args:
             theta (qiskit.circuit.Parameter): the parameter of the appended gate
-            operator (qiskit.quautm_info.SparsePauliOp): the anti-Hermitian generator 
+            operator (qiskit.quantum_info.SparsePauliOp): the anti-Hermitian generator 
                                                          that we are going to exponentiate 
         """
         appendCircuit = QuantumCircuit(self.n_qubits)
