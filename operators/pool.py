@@ -42,7 +42,9 @@ def excitations(n_electrons,
 def spin_complemented_pool(n_electrons,
                            n_orbitals,
                            generalized=True) -> list[FermionOperator]:
-    
+
+    # Number of occupied orbitals should not be 1/2 the number of electrons (n_electrons). Hunds Rule will force high-spin states. (Need to discuss with Junze)
+                             
     n_occ = n_electrons // 2
     n_vir = n_orbitals - n_occ
     pool = []
@@ -60,7 +62,7 @@ def spin_complemented_pool(n_electrons,
         q_up = q * 2
         q_down = q * 2 + 1
         
-        # virtual oribitals
+        # virtual orbitals
         startIndex = q+1 if generalized else n_occ
         for p in range(startIndex, n_orbitals):
             p_up = p * 2

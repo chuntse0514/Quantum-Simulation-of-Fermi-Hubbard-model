@@ -67,6 +67,9 @@ class AdaptVQE:
         qnn = self.construct_qnn(commutators)
         return qnn(torch.Tensor([])).detach().numpy()
 
+    # Subroutine selectOperator() should not be written such that it needs to re-calculate calculatePoolElementGradient() for every loop in the in maxIter.
+    # calculatePoolElementGradient() should be calculated once at the start of vqe.run(), and stored for accessing during every loop of maxIter,
+    # and all maxgrad operators previously chosen should be skipped in the selectOperator().
     def selectOperator(self):
         gradients = self.calculatePoolElementGradient()
         # print(np.round(gradients, decimals=3))
@@ -79,7 +82,7 @@ class AdaptVQE:
         """
         Args:
             theta (qiskit.circuit.Parameter): the parameter of the appended gate
-            operator (qiskit.quautm_info.SparsePauliOp): the anti-Hermitian generator 
+            operator (qiskit.quantum_info.SparsePauliOp): the anti-Hermitian generator 
                                                          that we are going to exponentiate 
         """
         appendCircuit = QuantumCircuit(self.n_qubits)
@@ -96,7 +99,8 @@ class AdaptVQE:
 
         time1 = time.time()
 
-        # prepare Hartree-Fock state
+        # prepare Hartree-Fock state (Bogoliubov transformation needs to be copied/implemented from previous code.)
+        # Actually, only initializing in linear superposition of |1> and |0> for each qubit. 
         for i in range(self.n_electrons):
             self.circuit.x(i)
         
@@ -116,7 +120,7 @@ class AdaptVQE:
 
             print(f'==== Found maximium gradient {np.abs(max_grad)} at index {max_grad_index} ====')
 
-            # termiate the Adapt-VQE if the largest gradient is less than the threshold
+            # terminate the Adapt-VQE if the largest gradient is less than the threshold
             if np.abs(max_grad) < self.threshold:
                 print(f'==== Adapt-VQE has terminated at iteration {i+1} since the convergence criterion is satisfied. ====')
                 self.maxIter = i
