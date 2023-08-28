@@ -63,7 +63,7 @@ class AdaptVQE:
         return TorchConnector(qnn, self.params)
 
     def calculatePoolElementGradient(self):
-        commutators = [self. qubitHamiltonian @ op - op @ self.qubitHamiltonian for op in self.pool]
+        commutators = [self.qubitHamiltonian @ op - op @ self.qubitHamiltonian for op in self.pool]
         qnn = self.construct_qnn(commutators)
         return qnn(torch.Tensor([])).detach().numpy()
 

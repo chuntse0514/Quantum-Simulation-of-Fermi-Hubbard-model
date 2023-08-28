@@ -46,7 +46,7 @@ def processPauliString(operator: SparsePauliOp):
         qIndex = []
         coeffs.append((coeff * 2j).real)
 
-        for index, pauli in enumerate(pauliString):
+        for index, pauli in enumerate(pauliString[::-1]):
             
             if pauli != 'I':
                 processedString.append(pauli)
