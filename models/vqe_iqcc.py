@@ -32,7 +32,7 @@ class IQCC:
         self.maxIter = maxIter
         self.lr = lr
         self.threshold = threshold
-        self.Ng = 3
+        self.Ng = 8
         self.n_qubits = molecule.n_qubits
         self.n_electrons = molecule.n_electrons
 
@@ -47,7 +47,10 @@ class IQCC:
         for i in range(self.n_qubits):
             self.circuit.ry(Parameter(f'theta_{i}'), qubit=i)
             self.circuit.rz(Parameter(f'phi_{i}'), qubit=i)
-        self.loss_history = []
+        self.loss_history = {
+            'iteration': [],
+            'epoch': []
+        }
         self.num_generator = []
 
     def get_qnn1(self, observables: list[SparsePauliOp]):
@@ -58,7 +61,7 @@ class IQCC:
             weight_params=self.circuit.parameters,
         )
 
-        return TorchConnector(qnn, initial_weights=np.concatenate((vqe.phi, vqe.theta), axis=0))
+        return TorchConnector(qnn, initial_weights=np.concatenate((self.phi, self.theta), axis=0))
     
     def get_qnn2(self, circuit: QuantumCircuit):
         qnn = EstimatorQNN(
@@ -69,7 +72,7 @@ class IQCC:
         )
 
         num_generators = self.num_generator[-1]
-        return TorchConnector(qnn, initial_weights=np.concatenate((np.zeros(num_generators), vqe.phi, vqe.theta), axis=0))
+        return TorchConnector(qnn, initial_weights=np.concatenate((np.zeros(num_generators), self.phi, self.theta), axis=0))
     
     def partition_hamiltonian(self):
         
@@ -124,6 +127,11 @@ class IQCC:
     
     def run(self):
 
+        figure = plt.figure(figsize=(12, 6))
+        ax1 = figure.add_subplot(1, 2, 1)
+        ax2 = figure.add_subplot(1, 2, 2)
+        plt.ion()
+
         for i in range(self.maxIter):
 
             ops, grads = self.select_operators()
@@ -151,11 +159,14 @@ class IQCC:
                 loss = model(torch.Tensor([]))
                 loss.backward()
                 opt.step()
+                self.loss_history['iteration'].append(loss.item())
                 for p in model.parameters():
                     grads_norm = torch.linalg.vector_norm(p.grad)
                 if grads_norm < self.threshold:
                     break
             
+            self.loss_history['epoch'].append(loss.item())
+
             for p in model.parameters():
                 Ng = self.num_generator[-1]
                 tau = p.detach().numpy()[:Ng]
@@ -170,6 +181,28 @@ class IQCC:
 
             print(f'epoch: {i+1}, total energy: {loss.item()}')
 
+            length = len(self.loss_history['iteration'])
+            ax1.clear()
+            ax1.plot(np.arange(length)+1, self.loss_history['iteration'], marker='x', color='r', label='iqcc')
+            ax1.plot(np.arange(length)+1, np.full(length, self.molecule.fci_energy), linestyle='-', color='g', label='FCI')
+            ax1.set_xlabel('iterations')
+            ax1.set_ylabel('energy')
+            ax1.set_xlim(left=1)
+            ax1.legend()
+            ax1.grid()
+            
+            length = len(self.loss_history['epoch'])
+            ax2.clear()
+            ax2.plot(np.arange(length)+1, self.loss_history['epoch'], marker='^', color='b', label='iqcc')
+            ax2.plot(np.arange(length)+1, np.full(length, self.molecule.fci_energy), linestyle='-', color='g', label='FCI')
+            ax2.set_xlabel('epochs')
+            ax2.set_ylabel('energy')
+            ax2.set_xlim(left=1)
+            ax2.legend()
+            ax2.grid()
+
+            plt.savefig('output.png')
+            plt.pause(0.01)
            
 
 if __name__ == '__main__':
@@ -177,6 +210,6 @@ if __name__ == '__main__':
     from molecules import *
     
     molecule = H4(r=0.8)
-    vqe = IQCC(molecule, maxIter=100, lr=1e-2, threshold=1e-3)
+    vqe = IQCC(molecule, maxIter=100, lr=1e-2, threshold=1e-2)
     vqe.run()
 
