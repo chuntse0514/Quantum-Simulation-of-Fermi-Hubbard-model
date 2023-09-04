@@ -1,0 +1,262 @@
+import pennylane as qml
+from pennylane import numpy as np
+import torch 
+import torch.nn as nn
+import torch.optim as optim
+from openfermion import (
+    MolecularData, jordan_wigner, QubitOperator
+)
+import matplotlib.pyplot as plt
+from functools import reduce, partial
+
+def QubitOperator_to_qmlHamiltonian(op: QubitOperator):
+
+    pauliDict = {
+        'X': qml.PauliX,
+        'Y': qml.PauliY,
+        'Z': qml.PauliZ
+    }
+
+    coeffs = []
+    obs = []
+
+    for pauliString, coeff in op.terms.items():
+
+        if not pauliString:
+            coeffs.append(coeff)
+            obs.append(qml.Identity(wires=[0]))
+            continue
+        
+        coeffs.append(coeff)
+        pauliList = [pauliDict[pauli](index) for index, pauli in pauliString]
+        obs.append(reduce(lambda a, b: a @ b, pauliList))
+
+    return qml.Hamiltonian(coeffs, obs)
+
+def PauliStringRotation(theta, pauliString: tuple[str, list[int]]):
+    
+    # Basis rotation
+    for pauli, qindex in zip(*pauliString):
+        if pauli == 'X':
+            qml.RY(-np.pi / 2, wires=qindex)
+        elif pauli == 'Y':
+            qml.RX(np.pi / 2, wires=qindex)
+    
+    # CNOT layer
+    for q, q_next in zip(pauliString[1][:-1], pauliString[1][1:]):
+        qml.CNOT(wires=[q, q_next])
+    
+    # Z rotation
+    qml.RZ(theta, pauliString[1][-1])
+
+    # CNOT layer
+    for q, q_next in zip(reversed(pauliString[1][:-1]), reversed(pauliString[1][1:])):
+        qml.CNOT(wires=[q, q_next])
+
+    # Basis rotation
+    for pauli, qindex in zip(*pauliString):
+        if pauli == 'X':
+            qml.RY(np.pi / 2, wires=qindex)
+        elif pauli == 'Y':
+            qml.RX(-np.pi / 2, wires=qindex)
+
+class IQCC:
+    def __init__(self,
+                 molecule: MolecularData,
+                 n_epoch: int,
+                 lr: float,
+                 threshold: float
+                 ):
+
+        self.molecule = molecule
+        self.n_epoch = n_epoch
+        self.lr = lr
+        self.threshold = threshold
+        self.Ng = 8
+        self.ratio = 0.1
+        self.n_qubits = molecule.n_qubits
+        self.n_electrons = molecule.n_electrons
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+        self.fermionHamiltonian = molecule.get_molecular_hamiltonian()
+        self.currentHamiltonian = jordan_wigner(self.fermionHamiltonian)
+        self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(self.currentHamiltonian)
+
+        self.params = nn.ParameterDict({
+            'theta': nn.Parameter(torch.Tensor([np.pi for _ in range(self.n_electrons)] + [0 for _ in range(self.n_qubits - self.n_electrons)]), requires_grad=True),
+            'phi': nn.Parameter(torch.zeros(self.n_qubits), requires_grad=True),
+            'tau': nn.Parameter(torch.zeros(self.Ng), requires_grad=True)
+        }).to(self.device)
+
+        self.loss_history = {
+            'iteration': [],
+            'epoch': []
+        }
+        self.selectedGates = []
+        
+    def get_circuit(self, tau=None, appendGates=None):
+        
+        if not appendGates:
+            
+            for i in range(self.n_qubits):
+                qml.RY(self.params['theta'][i], wires=i)
+                qml.RZ(self.params['phi'][i], wires=i)
+            
+            for i, gate in enumerate(self.selectedGates):
+                gate(self.params['tau'][i])
+
+            return qml.expval(self.qmlHamiltonian)
+        
+        else:
+            for i in range(self.n_qubits):
+                qml.RY(self.params['theta'][i].detach(), wires=i)
+                qml.RZ(self.params['phi'][i].detach(), wires=i)
+            
+            for i, gate in enumerate(appendGates):
+                gate(tau[i])
+
+            return qml.expval(self.qmlHamiltonian)
+
+    def partition_hamiltonian(self):
+        
+        partitioned_hamiltonian = {}
+
+        for pauliString, coeff in self.currentHamiltonian.terms.items():
+
+            flip_indicies = []
+
+            for index, pauli in pauliString:
+                if pauli == 'X' or pauli == 'Y':
+                    flip_indicies.append(index)
+            
+            flip_indicies = tuple(flip_indicies)
+
+            if partitioned_hamiltonian.get(flip_indicies) is None:
+                partitioned_hamiltonian[flip_indicies] = coeff * QubitOperator(pauliString)
+            else:
+                partitioned_hamiltonian[flip_indicies] += coeff * QubitOperator(pauliString)
+        
+        return partitioned_hamiltonian
+    
+    def select_operator(self):
+
+        partitioned_hamiltonian = self.partition_hamiltonian()
+        DIS_gates = []
+        DIS_strings = []
+
+        for flip_indicies in partitioned_hamiltonian.keys():
+
+            if len(flip_indicies) == 0:
+                continue
+
+            Pk = ('Y' + 'X' * (len(flip_indicies)-1), flip_indicies)
+            gate = partial(PauliStringRotation, pauliString=Pk)
+            DIS_gates.append(gate)
+
+            Pk_string = ''
+            for pauli, index in zip(*Pk):
+                Pk_string += pauli + str(index) + ' '
+            DIS_strings.append(Pk_string[:-1])
+
+        dev = qml.device('default.qubit.torch', wires=self.n_qubits)
+        tau = nn.Parameter(torch.zeros(len(DIS_gates)), requires_grad=True)
+        circuit = self.get_circuit
+        model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
+        loss = model(tau, DIS_gates)
+        loss.backward()
+        grads = tau.grad.detach().cpu().numpy()
+        grads = np.abs(grads)
+
+        max_grad = np.max(grads)
+        if max_grad * self.ratio > self.threshold:
+            self.Ng = np.sum(grads > max_grad * self.ratio)
+        else:
+            self.Ng = np.sum(grads > self.threshold)
+        
+        maxIndicies = np.argsort(grads)[::-1][:self.Ng]
+        maxGrads = grads[maxIndicies]
+        maxGates = [DIS_gates[index] for index in maxIndicies]
+        maxOperators = [DIS_strings[index] for index in maxIndicies]
+
+        return maxGates, maxOperators, maxGrads
+
+    def run(self):
+
+        fig = plt.figure(figsize=(12, 6))
+        ax1 = fig.add_subplot(1, 2, 1)
+        ax2 = fig.add_subplot(1, 2, 2)
+
+        dev = qml.device('default.qubit.torch', wires=self.n_qubits)
+
+        for i_epoch in range(self.n_epoch):
+
+            maxGates, maxOperators, maxGrads = self.select_operator()
+
+            print(f'=== Found operators: {maxOperators} \n with gradients: {maxGrads} ====')
+
+            if len(maxGrads) == 0:
+                break
+
+            self.selectedGates = maxGates
+            self.params['tau'] = nn.Parameter(torch.zeros(self.Ng), requires_grad=True).to(self.device)
+
+            circuit = self.get_circuit
+            model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
+            opt = optim.Adam(self.params.values(), lr=self.lr)
+
+            while True:
+                opt.zero_grad()
+                loss = model()
+                loss.backward()
+                opt.step()
+                self.loss_history['iteration'].append(loss.item())
+                grad_vec = torch.cat((self.params['theta'].grad, self.params['phi'].grad, self.params['tau'].grad))
+                grad_norm = torch.linalg.vector_norm(grad_vec)
+                if grad_norm < self.threshold:
+                    break
+                print(loss.item(), grad_norm)
+            
+            self.loss_history['epoch'].append(loss.item())
+            self.selectedGates = []
+
+            maxOperators = [QubitOperator(op) for op in maxOperators]
+            for P_k, tau_k in zip(maxOperators[::-1], self.params['tau'].detach().cpu().numpy()[::-1]):
+                first_term = np.sin(tau_k) * (-1j / 2) * (self.currentHamiltonian * P_k - P_k * self.currentHamiltonian)
+                second_term = 1 / 2 * (1 - np.cos(tau_k)) * (P_k * self.currentHamiltonian * P_k - self.currentHamiltonian)
+                self.currentHamiltonian += first_term + second_term
+            self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(self.currentHamiltonian)
+            
+            print(f'epoch: {i_epoch+1}, total energy: {loss.item()}')
+
+            length = len(self.loss_history['iteration'])
+            ax1.clear()
+            ax1.plot(np.arange(length)+1, self.loss_history['iteration'], marker='x', color='r', label='iqcc')
+            ax1.plot(np.arange(length)+1, np.full(length, self.molecule.fci_energy), linestyle='-', color='g', label='FCI')
+            ax1.set_xlabel('iterations')
+            ax1.set_ylabel('energy')
+            ax1.legend()
+            ax1.grid()
+            plt.pause(0.01)
+
+            length = len(self.loss_history['epoch'])
+            ax2.clear()
+            ax2.plot(np.arange(length)+1, self.loss_history['epoch'], marker='^', color='b', label='iqcc')
+            ax2.plot(np.arange(length)+1, np.full(length, self.molecule.fci_energy), linestyle='-', color='g', label='FCI')
+            ax2.set_xlabel('epochs')
+            ax2.set_ylabel('energy')
+            ax2.legend()
+            ax2.grid()
+
+            plt.savefig('output.png')
+            plt.pause(0.01)
+
+
+if __name__ == '__main__':
+    from molecules import *
+    molecule = LiH(r=0.8)
+    vqe = IQCC(
+        molecule, n_epoch=5, lr=1e-2, threshold=1e-2
+    )
+    vqe.run()
+    
+    

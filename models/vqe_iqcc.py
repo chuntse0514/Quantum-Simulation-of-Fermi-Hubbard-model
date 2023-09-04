@@ -1,9 +1,8 @@
-from qiskit import QuantumCircuit, QuantumRegister
+from qiskit import QuantumCircuit
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-import openfermion as of
 from openfermion import (
     MolecularData, FermionOperator, jordan_wigner
 )
@@ -12,13 +11,12 @@ from .utils import (
     processPauliString,
     exponentialPauliString
 )
-from qiskit.primitives import Estimator
+from qiskit_aer.primitives import Estimator
 from qiskit.circuit import Parameter
 from qiskit.quantum_info import SparsePauliOp
 from qiskit_machine_learning.connectors import TorchConnector
 from qiskit_machine_learning.neural_networks import EstimatorQNN
 import matplotlib.pyplot as plt
-import time
 
 class IQCC:
     def __init__(self,
@@ -212,4 +210,3 @@ if __name__ == '__main__':
     molecule = H4(r=0.8)
     vqe = IQCC(molecule, maxIter=100, lr=1e-2, threshold=1e-2)
     vqe.run()
-
