@@ -1,89 +1,50 @@
 import pennylane as qml
 from pennylane import numpy as np
-import torch 
+import torch
 import torch.nn as nn
 import torch.optim as optim
 from openfermion import (
-    MolecularData, jordan_wigner, QubitOperator
+    FermionOperator, 
+    InteractionOperator, 
+    QubitOperator,
+    count_qubits,
+    jordan_wigner,
+    get_interaction_operator,
+    get_sparse_operator,
+    get_ground_state
 )
 import matplotlib.pyplot as plt
-from functools import reduce, partial
-
-def QubitOperator_to_qmlHamiltonian(op: QubitOperator):
-
-    pauliDict = {
-        'X': qml.PauliX,
-        'Y': qml.PauliY,
-        'Z': qml.PauliZ
-    }
-
-    coeffs = []
-    obs = []
-
-    for pauliString, coeff in op.terms.items():
-
-        if not pauliString:
-            coeffs.append(coeff)
-            obs.append(qml.Identity(wires=[0]))
-            continue
-        
-        coeffs.append(coeff)
-        pauliList = [pauliDict[pauli](index) for index, pauli in pauliString]
-        obs.append(reduce(lambda a, b: a @ b, pauliList))
-
-    return qml.Hamiltonian(coeffs, obs)
-
-def PauliStringRotation(theta, pauliString: tuple[str, list[int]]):
-    
-    # Basis rotation
-    for pauli, qindex in zip(*pauliString):
-        if pauli == 'X':
-            qml.RY(-np.pi / 2, wires=qindex)
-        elif pauli == 'Y':
-            qml.RX(np.pi / 2, wires=qindex)
-    
-    # CNOT layer
-    for q, q_next in zip(pauliString[1][:-1], pauliString[1][1:]):
-        qml.CNOT(wires=[q, q_next])
-    
-    # Z rotation
-    qml.RZ(theta, pauliString[1][-1])
-
-    # CNOT layer
-    for q, q_next in zip(reversed(pauliString[1][:-1]), reversed(pauliString[1][1:])):
-        qml.CNOT(wires=[q, q_next])
-
-    # Basis rotation
-    for pauli, qindex in zip(*pauliString):
-        if pauli == 'X':
-            qml.RY(np.pi / 2, wires=qindex)
-        elif pauli == 'Y':
-            qml.RX(-np.pi / 2, wires=qindex)
+from .utils import (
+    QubitOperator_to_qmlHamiltonian,
+    PauliStringRotation
+)
+from functools import partial
 
 class IQCC:
     def __init__(self,
-                 molecule: MolecularData,
+                 fermion_hamiltonian: FermionOperator | InteractionOperator,
                  n_epoch: int,
                  lr: float,
                  threshold: float
                  ):
-
-        self.molecule = molecule
+        
         self.n_epoch = n_epoch
         self.lr = lr
         self.threshold = threshold
-        self.Ng = 8
+        self.Ng = 0
         self.ratio = 0.1
-        self.n_qubits = molecule.n_qubits
-        self.n_electrons = molecule.n_electrons
+        self.n_qubits = count_qubits(fermion_hamiltonian)
+        self.n_electrons = self.n_qubits // 2
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-        self.fermionHamiltonian = molecule.get_molecular_hamiltonian()
+        if isinstance(fermion_hamiltonian, FermionOperator):
+            fermion_hamiltonian = get_interaction_operator(fermion_hamiltonian)
+        self.fermionHamiltonian = fermion_hamiltonian
         self.currentHamiltonian = jordan_wigner(self.fermionHamiltonian)
         self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(self.currentHamiltonian)
 
         self.params = nn.ParameterDict({
-            'theta': nn.Parameter(torch.Tensor([np.pi for _ in range(self.n_electrons)] + [0 for _ in range(self.n_qubits - self.n_electrons)]), requires_grad=True),
+            'theta': nn.Parameter(torch.Tensor([np.pi] * self.n_electrons + [0] * (self.n_qubits - self.n_electrons)), requires_grad=True),
             'phi': nn.Parameter(torch.zeros(self.n_qubits), requires_grad=True),
             'tau': nn.Parameter(torch.zeros(self.Ng), requires_grad=True)
         }).to(self.device)
@@ -93,11 +54,12 @@ class IQCC:
             'epoch': []
         }
         self.selectedGates = []
-        
+        self.ground_state_energy, self.ground_state_wf = get_ground_state(get_sparse_operator(fermion_hamiltonian))
+
     def get_circuit(self, tau=None, appendGates=None):
-        
+
         if not appendGates:
-            
+
             for i in range(self.n_qubits):
                 qml.RY(self.params['theta'][i], wires=i)
                 qml.RZ(self.params['phi'][i], wires=i)
@@ -106,7 +68,7 @@ class IQCC:
                 gate(self.params['tau'][i])
 
             return qml.expval(self.qmlHamiltonian)
-        
+
         else:
             for i in range(self.n_qubits):
                 qml.RY(self.params['theta'][i].detach(), wires=i)
@@ -116,9 +78,9 @@ class IQCC:
                 gate(tau[i])
 
             return qml.expval(self.qmlHamiltonian)
-
-    def partition_hamiltonian(self):
         
+    def partition_hamiltonian(self):
+
         partitioned_hamiltonian = {}
 
         for pauliString, coeff in self.currentHamiltonian.terms.items():
@@ -137,7 +99,7 @@ class IQCC:
                 partitioned_hamiltonian[flip_indicies] += coeff * QubitOperator(pauliString)
         
         return partitioned_hamiltonian
-    
+
     def select_operator(self):
 
         partitioned_hamiltonian = self.partition_hamiltonian()
@@ -179,7 +141,7 @@ class IQCC:
         maxOperators = [DIS_strings[index] for index in maxIndicies]
 
         return maxGates, maxOperators, maxGrads
-
+    
     def run(self):
 
         fig = plt.figure(figsize=(12, 6))
@@ -231,7 +193,7 @@ class IQCC:
             length = len(self.loss_history['iteration'])
             ax1.clear()
             ax1.plot(np.arange(length)+1, self.loss_history['iteration'], marker='x', color='r', label='iqcc')
-            ax1.plot(np.arange(length)+1, np.full(length, self.molecule.fci_energy), linestyle='-', color='g', label='FCI')
+            ax1.plot(np.arange(length)+1, np.full(length, self.ground_state_energy), linestyle='-', color='g', label='FCI')
             ax1.set_xlabel('iterations')
             ax1.set_ylabel('energy')
             ax1.legend()
@@ -241,7 +203,7 @@ class IQCC:
             length = len(self.loss_history['epoch'])
             ax2.clear()
             ax2.plot(np.arange(length)+1, self.loss_history['epoch'], marker='^', color='b', label='iqcc')
-            ax2.plot(np.arange(length)+1, np.full(length, self.molecule.fci_energy), linestyle='-', color='g', label='FCI')
+            ax2.plot(np.arange(length)+1, np.full(length, self.ground_state_energy), linestyle='-', color='g', label='ED')
             ax2.set_xlabel('epochs')
             ax2.set_ylabel('energy')
             ax2.legend()
@@ -249,14 +211,21 @@ class IQCC:
 
             plt.savefig('output.png')
             plt.pause(0.01)
-
-
+    
 if __name__ == '__main__':
-    from molecules import *
-    molecule = LiH(r=0.8)
+    from openfermion import fermi_hubbard
+    hamiltonian = fermi_hubbard(
+        x_dimension=2,
+        y_dimension=2,
+        tunneling=1,
+        coulomb=4,
+        periodic=True,
+        spinless=False
+    )
     vqe = IQCC(
-        molecule, n_epoch=5, lr=1e-2, threshold=1e-2
+        fermion_hamiltonian=hamiltonian,
+        n_epoch=100,
+        lr=1e-2,
+        threshold=5e-3
     )
     vqe.run()
-    
-    

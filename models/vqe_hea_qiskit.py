@@ -1,11 +1,9 @@
-from qiskit import QuantumCircuit, QuantumRegister
+from qiskit import QuantumCircuit
 import numpy as np
 import torch
 from torch.optim import Adam
-import torch.nn as nn
-import openfermion as of
 from openfermion import (
-    MolecularData, get_sparse_operator, jordan_wigner
+    MolecularData, jordan_wigner
 )
 from .utils import (
     QubitOperator_to_SparsePauliOp,
@@ -36,7 +34,6 @@ class VQE:
         self.n_orbitals = molecule.n_orbitals
 
         self.fermionicHamiltonian = molecule.get_molecular_hamiltonian()
-        self.sparseHamiltonian = get_sparse_operator(self.fermionicHamiltonian)
         self.qubitHamiltonian = jordan_wigner(self.fermionicHamiltonian)
         self.pauliHamiltonian = QubitOperator_to_SparsePauliOp(self.qubitHamiltonian, self.n_qubits)
 

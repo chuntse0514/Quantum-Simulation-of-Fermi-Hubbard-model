@@ -3,21 +3,11 @@ from openfermion import QubitOperator
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import SparsePauliOp
 from qiskit.circuit import Parameter
+import pennylane as qml
+from functools import reduce
 
 def QubitOperator_to_SparsePauliOp(qubitHamiltonian: QubitOperator, num_qubits) -> SparsePauliOp:
-    """
-    Convert the QubitOperator to the SparsePauliOp
 
-    Args:
-        qubitHamiltonian (openfermion.QubitOperator)
-
-    Returns:
-        sparseHamiltonian (qiskit.quantum_info.SparsePauliOp)
-    """
-
-    # This link demostrates how to construct a SparsePauliOp
-    # https://qiskit.org/documentation/stubs/qiskit.quantum_info.SparsePauliOp.from_sparse_list.html#qiskit.quantum_info.SparsePauliOp.from_sparse_list
-    
     sparseList = []
 
     for pauliString, coeff in qubitHamiltonian.terms.items():
@@ -34,6 +24,57 @@ def QubitOperator_to_SparsePauliOp(qubitHamiltonian: QubitOperator, num_qubits) 
     sparseHamiltonian = SparsePauliOp.from_sparse_list(sparseList, num_qubits=num_qubits)
 
     return sparseHamiltonian
+
+def QubitOperator_to_qmlHamiltonian(op: QubitOperator):
+
+    pauliDict = {
+        'X': qml.PauliX,
+        'Y': qml.PauliY,
+        'Z': qml.PauliZ
+    }
+
+    coeffs = []
+    obs = []
+
+    for pauliString, coeff in op.terms.items():
+
+        if not pauliString:
+            coeffs.append(coeff)
+            obs.append(qml.Identity(wires=[0]))
+            continue
+        
+        coeffs.append(coeff)
+        pauliList = [pauliDict[pauli](index) for index, pauli in pauliString]
+        obs.append(reduce(lambda a, b: a @ b, pauliList))
+
+    return qml.Hamiltonian(coeffs, obs)
+
+def PauliStringRotation(theta, pauliString: tuple[str, list[int]]):
+    
+    # Basis rotation
+    for pauli, qindex in zip(*pauliString):
+        if pauli == 'X':
+            qml.RY(-np.pi / 2, wires=qindex)
+        elif pauli == 'Y':
+            qml.RX(np.pi / 2, wires=qindex)
+    
+    # CNOT layer
+    for q, q_next in zip(pauliString[1][:-1], pauliString[1][1:]):
+        qml.CNOT(wires=[q, q_next])
+    
+    # Z rotation
+    qml.RZ(theta, pauliString[1][-1])
+
+    # CNOT layer
+    for q, q_next in zip(reversed(pauliString[1][:-1]), reversed(pauliString[1][1:])):
+        qml.CNOT(wires=[q, q_next])
+
+    # Basis rotation
+    for pauli, qindex in zip(*pauliString):
+        if pauli == 'X':
+            qml.RY(np.pi / 2, wires=qindex)
+        elif pauli == 'Y':
+            qml.RX(-np.pi / 2, wires=qindex)
 
 def processPauliString(operator: SparsePauliOp):
 
