@@ -10,7 +10,7 @@ from openfermion import (
     jordan_wigner,
     get_sparse_operator,
     get_quadratic_hamiltonian,
-    get_ground_state,
+    jw_get_ground_state_at_particle_number,
 )
 from openfermion.hamiltonians.hubbard import (
     _hopping_term, 
@@ -147,6 +147,7 @@ class HVA:
                  lr: float,
                  threshold: float,
                  reps: int,
+                 init_strategy: str,
                  x_dimension: int,
                  y_dimension: int,
                  tunneling: float,
@@ -180,33 +181,42 @@ class HVA:
         )
         self.fermionHamiltonian = -tunneling * _horizontal_hopping + \
                                   -tunneling * _vertical_hopping + \
-                                  coulomb * _coulomb_interaction + \
-                                  _chemical_potential
+                                  coulomb * _coulomb_interaction
         self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(
             jordan_wigner(self.fermionHamiltonian)
         )
         self.nonInteractingHamiltonian = get_quadratic_hamiltonian(
             -tunneling * _horizontal_hopping + \
-            -tunneling * _vertical_hopping + \
-            _chemical_potential
+            -tunneling * _vertical_hopping
         )
         
         self.horizontal_hopping = jordan_wigner(_horizontal_hopping)
         self.vertical_hopping = jordan_wigner(_vertical_hopping)
         self.coulomb_interaction = jordan_wigner(_coulomb_interaction)
         self.chemical_potential = jordan_wigner(_chemical_potential)
+        
+        if init_strategy == 'Identity':
+            self.params = nn.ParameterDict({
+                'theta_U': nn.Parameter(torch.zeros(reps), requires_grad=True),
+                'theta_v': nn.Parameter(torch.zeros(reps), requires_grad=True),
+                'theta_h': nn.Parameter(torch.zeros(reps), requires_grad=True),
+            }).to(self.device)
+        elif init_strategy == 'Random-uniform':
+            self.params = nn.ParameterDict({
+                'theta_U': nn.Parameter((torch.rand(reps) * 2 - 1) * np.pi, requires_grad=True),
+                'theta_v': nn.Parameter((torch.rand(reps) * 2 - 1) * np.pi, requires_grad=True),
+                'theta_h': nn.Parameter((torch.rand(reps) * 2 - 1) * np.pi, requires_grad=True),
+            }).to(self.device)
 
-        self.params = nn.ParameterDict({
-            'theta_U': nn.Parameter(torch.zeros(reps), requires_grad=True),
-            'theta_v': nn.Parameter(torch.zeros(reps), requires_grad=True),
-            'theta_h': nn.Parameter(torch.zeros(reps), requires_grad=True),
-            'theta_mu': nn.Parameter(torch.zeros(reps), requires_grad=True)
-        })
-
-        self.ground_state_energy, self.ground_state_wf = get_ground_state(get_sparse_operator(self.fermionHamiltonian))
-        self.ground_state_wf = torch.Tensor(self.ground_state_wf)
+        self.ground_state_energy, self.ground_state_wf = jw_get_ground_state_at_particle_number(
+            sparse_operator=get_sparse_operator(self.fermionHamiltonian),
+            particle_number=self.n_electrons
+        )
+        self.ground_state_wf = torch.complex(
+            torch.Tensor(self.ground_state_wf.real).double(), torch.Tensor(self.ground_state_wf.imag).double()
+        ).to(self.device)
         self.loss_history = []
-        self.filename = f'./images/HVA-{x_dimension}x{y_dimension}, layers={reps}.png'
+        self.filename = f'./images/HVA-{x_dimension}x{y_dimension},t={tunneling}, U={coulomb}, layers={reps}, init={init_strategy}.png'
 
     def Trotterize_operator(self, theta, operator: QubitOperator):
         
@@ -247,7 +257,6 @@ class HVA:
         for rep in range(self.reps):
             self.Trotterize_operator(self.params['theta_v'][rep], self.vertical_hopping)
             self.Trotterize_operator(self.params['theta_h'][rep], self.horizontal_hopping)
-            self.Trotterize_operator(self.params['theta_mu'][rep], self.chemical_potential)
             if rep != self.reps-1:
                 self.Trotterize_operator((self.params['theta_U'][rep] + self.params['theta_U'][rep+1]) / 2,
                                          self.coulomb_interaction)
@@ -256,6 +265,23 @@ class HVA:
 
         return qml.expval(self.qmlHamiltonian)
 
+    def get_state(self):
+        
+        self.prepare_nonInteracting_groundState()
+        
+        self.Trotterize_operator(self.params['theta_U'][0] / 2, self.coulomb_interaction)
+        for rep in range(self.reps):
+            self.Trotterize_operator(self.params['theta_v'][rep], self.vertical_hopping)
+            self.Trotterize_operator(self.params['theta_h'][rep], self.horizontal_hopping)
+            if rep != self.reps-1:
+                self.Trotterize_operator((self.params['theta_U'][rep] + self.params['theta_U'][rep+1]) / 2,
+                                         self.coulomb_interaction)
+            else:
+                self.Trotterize_operator(self.params['theta_U'][rep], self.coulomb_interaction)
+
+        return qml.state()
+
+
     def run(self):
         
         plt.ion()
@@ -263,21 +289,27 @@ class HVA:
         ax = fig.add_subplot(1, 1, 1)
 
         dev = qml.device('default.qubit.torch', wires=self.n_qubits)
-        opt = optim.Adam(params=self.params.values(), lr=self.lr)
+        opt = optim.NAdam(params=self.params.values(), lr=self.lr)
         circuit = self.get_circuit
+        circuit2 = self.get_state
         model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
-
+        model2 = qml.QNode(circuit2, dev, interface='torch', diff_method='backprop')
+        
         for i_epoch in range(self.n_epoch):
             
             opt.zero_grad()
             loss = model()
+            state = model2()
             loss.backward()
             opt.step()
 
             self.loss_history.append(loss.item())
 
             if (i_epoch + 1) % 5 == 0:
-                print(f'epoch: {i_epoch+1}, energy: {loss.item()}')
+                print(f'epoch: {i_epoch+1}, energy: {loss.item()}, fidelity: {(torch.inner(state.conj(), self.ground_state_wf).abs() ** 2).item()}')
+                print(self.params['theta_U'])
+                print(self.params['theta_v'])
+                print(self.params['theta_h'])
             
             ax.clear()
             ax.plot(np.arange(i_epoch+1)+1, self.loss_history, marker='X', color='r', label='HVA')
@@ -288,21 +320,22 @@ class HVA:
             ax.grid()
 
             plt.pause(0.01)
+            plt.savefig(self.filename)
 
         plt.ioff()
         plt.show()
-        plt.savefig(self.filename)
     
 if __name__ == '__main__':
     vqe = HVA(
         n_epoch=200,
-        lr=1e-2,
+        lr=1e-3,
         threshold=1e-3,
-        reps=3,
+        reps=20,
+        init_strategy='Identity',
         x_dimension=2,
         y_dimension=2,
         tunneling=1,
-        coulomb=4,
+        coulomb=0.1,
     )
 
     vqe.run()
