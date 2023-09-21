@@ -176,7 +176,7 @@ class IQCC:
                 grad_norm = torch.linalg.vector_norm(grad_vec)
                 if grad_norm < self.threshold:
                     break
-                print(loss.item(), grad_norm)
+                print(loss.item(), grad_norm.item())
             
             self.loss_history['epoch'].append(loss.item())
             self.selectedGates = []
@@ -209,8 +209,8 @@ class IQCC:
             ax2.legend()
             ax2.grid()
 
-            plt.savefig('output.png')
             plt.pause(0.01)
+            plt.savefig('./images/`iqcc-hubbard-2x2.png')
     
 if __name__ == '__main__':
     from openfermion import fermi_hubbard
@@ -220,7 +220,7 @@ if __name__ == '__main__':
         tunneling=1,
         coulomb=4,
         periodic=True,
-        spinless=False
+        spinless=False,
     )
     vqe = IQCC(
         fermion_hamiltonian=hamiltonian,
