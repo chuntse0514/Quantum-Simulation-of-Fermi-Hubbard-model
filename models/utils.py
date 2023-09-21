@@ -1,5 +1,5 @@
 import numpy as np
-from openfermion import QubitOperator
+from openfermion import QubitOperator, up_index, down_index
 from qiskit import QuantumCircuit
 from qiskit.quantum_info import SparsePauliOp
 from qiskit.circuit import Parameter
@@ -135,3 +135,162 @@ def exponentialPauliString(theta: Parameter, pauliString: tuple[list[str], list[
     qc_inst = qc.to_instruction()
 
     return qc_inst
+
+def compile_hva_gate(x_dimension, y_dimension, periodic):
+
+    def tuple2index(x, y, spin):
+        return 2 * (x + y * x_dimension) + spin
+
+    horizontal_gate_set = []
+    vertical_gate_set = []
+
+    # compile horizontal gate
+    # for Nx = 2, only one parameter
+    if x_dimension == 2:
+        h_gates = []
+        for y in range(y_dimension):
+            h_gates += [
+                (tuple2index(0, y, spin), tuple2index(1, y, spin))
+                for spin in (0, 1)
+            ]
+        horizontal_gate_set.append(h_gates)
+    
+    # for Nx > 2 and Nx odd, there are 3 parameters
+    elif periodic and x_dimension % 2 == 1:
+        h_gates1 = []
+        h_gates2 = []
+        h_gates3 = []
+        for y in range(y_dimension):
+            h_gates1 += [
+                (tuple2index(x, y, spin), tuple2index(x+1, y, spin))
+                for x in range(x_dimension) if x % 2 == 0 and x+1 != x_dimension
+                for spin in (0, 1)
+            ]
+            h_gates2 += [
+                (tuple2index(x, y, spin), tuple2index(x+1, y, spin))
+                for x in range(x_dimension) if x % 2 == 1 
+                for spin in (0, 1)
+            ]
+            h_gates3 += [
+                (tuple2index(0, y, spin), tuple2index(x_dimension-1, y, spin))
+                for spin in (0, 1)
+            ]
+        horizontal_gate_set.append(h_gates1)
+        horizontal_gate_set.append(h_gates2)
+        horizontal_gate_set.append(h_gates3)
+
+    # for other cases of Nx > 2, there are 2 parameters 
+    else:
+        h_gates1 = []
+        h_gates2 = []
+
+        # even and periodic
+        if periodic:
+            for y in range(y_dimension):
+                h_gates1 += [
+                    (tuple2index(x, y, spin), tuple2index(x+1, y, spin))
+                    for x in range(x_dimension) if x % 2 == 0
+                    for spin in (0, 1)
+                ]
+                h_gates2 += [
+                    (tuple2index(x, y, spin), tuple2index(x+1, y, spin))
+                    for x in range(x_dimension) if x % 2 == 1 and x+1 != x_dimension
+                    for spin in (0, 1)
+                ] + [
+                    (tuple2index(0, y, spin), tuple2index(x_dimension-1, y, spin))
+                    for spin in (0, 1)
+                ]
+
+        # not periodic
+        else:
+            for y in range(y_dimension):
+                h_gates1 += [
+                    (tuple2index(x, y, spin), tuple2index(x+1, y, spin))
+                    for x in range(x_dimension) if x % 2 == 0 and x+1 != x_dimension
+                    for spin in (0, 1)
+                ]
+                h_gates2 += [
+                    (tuple2index(x, y, spin), tuple2index(x+1, y, spin))
+                    for x in range(x_dimension) if x % 2 == 1 and x+1 != x_dimension
+                    for spin in (0, 1)
+                ]
+
+        horizontal_gate_set.append(h_gates1)
+        horizontal_gate_set.append(h_gates2)
+
+
+    # compile vertical gate
+    # for Ny = 2, only one parameter
+    if y_dimension == 2:
+        v_gates = []
+        for x in range(x_dimension):
+            v_gates += [
+                (tuple2index(x, 0, spin), tuple2index(x, 1, spin))
+                for spin in (0, 1)
+            ]
+        vertical_gate_set.append(v_gates)
+    
+    # for Ny > 2 and Ny odd, there are 3 parameters
+    elif periodic and y_dimension % 2 == 1:
+        v_gates1 = []
+        v_gates2 = []
+        v_gates3 = []
+        for x in range(x_dimension):
+            v_gates1 += [
+                (tuple2index(x, y, spin), tuple2index(x, y+1, spin))
+                for y in range(y_dimension) if y % 2 == 0 and y+1 != y_dimension
+                for spin in (0, 1)
+            ]
+            v_gates2 += [
+                (tuple2index(x, y, spin), tuple2index(x, y+1, spin))
+                for y in range(y_dimension) if y % 2 == 1
+                for spin in (0, 1)
+            ]
+            v_gates3 += [
+                (tuple2index(x, 0, spin), tuple2index(x, y_dimension-1, spin))
+                for spin in (0, 1)
+            ]
+        vertical_gate_set.append(v_gates1)
+        vertical_gate_set.append(v_gates2)
+        vertical_gate_set.append(v_gates3)
+
+    # for other cases of Ny > 2, there are 2 parameters 
+    else:
+        v_gates1 = []
+        v_gates2 = []
+
+        # even and periodic
+        if periodic:
+            for x in range(x_dimension):
+                v_gates1 += [
+                    (tuple2index(x, y, spin), tuple2index(x, y+1, spin))
+                    for y in range(y_dimension) if y % 2 == 0
+                    for spin in (0, 1)
+                ]
+                v_gates2 += [
+                    (tuple2index(x, y, spin), tuple2index(x, y+1, spin))
+                    for y in range(y_dimension) if y % 2 == 1 and y+1 != y_dimension
+                    for spin in (0, 1)
+                ] + [
+                    (tuple2index(x, 0, spin), tuple2index(x, y_dimension-1, spin))
+                    for spin in (0, 1)
+                ]
+
+        # not periodic
+        else:
+            for x in range(x_dimension):
+                v_gates1 += [
+                    (tuple2index(x, y, spin), tuple2index(x, y+1, spin))
+                    for y in range(y_dimension) if y % 2 == 0 and y+1 != y_dimension
+                    for spin in (0, 1)
+                ]
+                v_gates2 += [
+                    (tuple2index(x, y, spin), tuple2index(x, y+1, spin))
+                    for y in range(y_dimension) if y % 2 == 1 and y+1 != y_dimension
+                    for spin in (0, 1)
+                ]
+
+        vertical_gate_set.append(v_gates1)
+        vertical_gate_set.append(v_gates2)
+
+    return horizontal_gate_set, vertical_gate_set

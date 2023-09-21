@@ -1,6 +1,11 @@
 import openfermion as of
 import numpy as np
-from openfermion import FermionOperator, hermitian_conjugated, normal_ordered
+from openfermion import (
+    FermionOperator,
+    hermitian_conjugated,
+    normal_ordered,
+    up_index, down_index
+)
 
 # SD = {
 #   (p, q), 1 <= p <= q <= M 
@@ -123,3 +128,69 @@ def spin_complemented_pool(n_electrons,
                         pool.append(op2)
 
     return pool
+
+def hubbard_interaction_pool(Nx, Ny):
+
+    hubbard_interaction_channel = {
+        'ZS channel': [],
+        'ZS2 channel': [],
+        'W channel': [],
+        'BCS channel': [],
+        'BCS2 channel': []
+    }
+
+    def tuple2index(ix, iy, spin):
+        return 2 * (ix + iy * Nx) + spin 
+    def index2tuple(index, spin=False):
+        if spin:
+            return ((index // 2) % Nx, (index // 2) // Nx, index % 2)
+        else:
+            return (index % Nx, index // Nx)
+
+    n_sites = Nx * Ny
+
+    for spin in (0, 1):
+        for k1 in range(n_sites):
+            for k2 in range(n_sites):
+                for q in range(n_sites):
+                    
+                    kx1, ky1 = index2tuple(k1, spin=False)
+                    kx2, ky2 = index2tuple(k2, spin=False)
+                    qx, qy = index2tuple(q, spin=False)
+
+                    # ZS channel
+                    # c^\dagger_{k1+q, \sigma} c^\dagger_{k2-q, -\sigma} c_{k2, -\sigma} c_{k1, \sigma}
+                    i1 = tuple2index((kx1+qx) % Nx, (ky1+qy) % Ny, spin)
+                    i2 = tuple2index((kx2-qx) % Nx, (ky2-qy) % Ny, spin^1)
+                    i3 = tuple2index(kx2, ky2, spin^1)
+                    i4 = tuple2index(kx1, ky1, spin)
+                    hubbard_interaction_channel['ZS channel'] += [
+                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}')
+                    ]
+
+
+                    # ZS2 channel
+                    # c^\dagger_{k1+q, \sigma} c^\dagger_{k2-q, -\sigma} c_{k2, \sigma} c_{k1, -\sigma}
+                    i1 = tuple2index((kx1+qx) % Nx, (ky1+qy) % Ny, spin)
+                    i2 = tuple2index((kx2-qx) % Nx, (ky2-qy) % Ny, spin^1)
+                    i3 = tuple2index(kx2, ky2, spin)
+                    i4 = tuple2index(kx1, ky1, spin^1)
+                    hubbard_interaction_channel['ZS2 channel'] += [
+                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}')
+                    ]
+
+
+                    # BCS channel
+                    # c^\dagger_{k1, \sigma} c^\dagger_{-k1+q, -\sigma} c_{-k2+q, -sigma} c_{k2, \sigma}
+                    i1 = tuple2index(kx1, ky1, spin)
+                    i2 = tuple2index((-kx1+qx) % Nx, (-ky1+qy) % Ny, spin^1)
+                    i3 = tuple2index((-kx2+qx) % Nx, (-ky2+qy) % Ny, spin^1)
+                    i4 = tuple2index(kx2, ky2, spin)
+                    hubbard_interaction_channel['BCS channel'] += [
+                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}')
+                    ]
+
+
+    return hubbard_interaction_channel
+
+    

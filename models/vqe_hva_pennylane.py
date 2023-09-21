@@ -9,8 +9,7 @@ from openfermion import (
     number_operator,
     jordan_wigner,
     get_sparse_operator,
-    get_quadratic_hamiltonian,
-    get_ground_state,
+    jw_get_ground_state_at_particle_number,
 )
 from openfermion.hamiltonians.hubbard import (
     _hopping_term, 
@@ -25,6 +24,7 @@ from .utils import (
     QubitOperator_to_qmlHamiltonian,
     PauliStringRotation
 )
+from operators.fourier import fourier_transform_matrix
 from functools import reduce
 
 def get_horizontal_hopping(x_dimension, y_dimension, periodic=True, spinless=False):
@@ -121,25 +121,37 @@ def get_coulomb_interaction(x_dimension, y_dimension, periodic=True, spinless=Fa
     
     return coulomb_interaction
 
-def get_chemical_potential(x_dimension, y_dimension, chemical_potential=0.0, 
-                           magnetic_field=0.0, spinless=False):
+def get_total_particle_operator(x_dimension, y_dimension, spinless=False):
+
+    n_sites = x_dimension * y_dimension
+    n_spin_orbitals = 2 * n_sites
+    total_particle_operator = FermionOperator()
+
+    for site in range(n_sites):
+
+        if spinless:
+            total_particle_operator += number_operator(n_sites, site, 1)
+        else:
+            total_particle_operator += number_operator(n_spin_orbitals, up_index(site), 1)
+            total_particle_operator += number_operator(n_spin_orbitals, down_index(site), 1)
+
+    return total_particle_operator
+
+def get_total_spin(x_dimension, y_dimension, spin_type):
     
     n_sites = x_dimension * y_dimension
     n_spin_orbitals = 2 * n_sites
-    chemical_potential_term = FermionOperator()
+    total_spin = FermionOperator()
 
     for site in range(n_sites):
-        
-        if spinless:
-            chemical_potential_term += number_operator(n_sites, site, -chemical_potential)
+        if spin_type == 'spin-up':
+            total_spin += number_operator(n_spin_orbitals, up_index(site), 1)
+        elif spin_type == 'spin-down':
+            total_spin += number_operator(n_spin_orbitals, down_index(site), 1)
         else:
-            chemical_potential_term += number_operator(n_spin_orbitals, up_index(site),
-                                                       -chemical_potential - magnetic_field)
-            chemical_potential_term += number_operator(n_spin_orbitals, down_index(site),
-                                                       -chemical_potential + magnetic_field)
-    
-    return chemical_potential_term
+            raise ValueError('spin_type must be either spin-up or spin-down')
 
+    return total_spin
 
 class HVA:
     def __init__(self,
@@ -151,8 +163,6 @@ class HVA:
                  y_dimension: int,
                  tunneling: float,
                  coulomb: float,
-                 chemical_potential=0.0,
-                 magnetic_field=0.0,
                  periodic=True,
                  spinless=False,
                  particle_hole_symmetry=False
@@ -175,36 +185,59 @@ class HVA:
         _coulomb_interaction = get_coulomb_interaction(
             x_dimension, y_dimension, periodic, spinless, particle_hole_symmetry
         )
-        _chemical_potential = get_chemical_potential(
-            x_dimension, y_dimension, chemical_potential, magnetic_field, spinless
+        _total_particle_operator = get_total_particle_operator(
+            x_dimension, y_dimension, spinless
         )
+        _total_up_spin = get_total_spin(x_dimension, y_dimension, 'spin-up')
+        _total_down_spin = get_total_spin(x_dimension, y_dimension, 'spin-down')
+
         self.fermionHamiltonian = -tunneling * _horizontal_hopping + \
                                   -tunneling * _vertical_hopping + \
-                                  coulomb * _coulomb_interaction + \
-                                  _chemical_potential
+                                  coulomb * _coulomb_interaction
+        
         self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(
             jordan_wigner(self.fermionHamiltonian)
         )
-        self.nonInteractingHamiltonian = get_quadratic_hamiltonian(
-            -tunneling * _horizontal_hopping + \
-            -tunneling * _vertical_hopping + \
-            _chemical_potential
-        )
+        self.transformation_matrix = fourier_transform_matrix(x_dimension, y_dimension)
         
         self.horizontal_hopping = jordan_wigner(_horizontal_hopping)
         self.vertical_hopping = jordan_wigner(_vertical_hopping)
         self.coulomb_interaction = jordan_wigner(_coulomb_interaction)
-        self.chemical_potential = jordan_wigner(_chemical_potential)
+        self.total_particle_operator = QubitOperator_to_qmlHamiltonian(
+            jordan_wigner(_total_particle_operator)
+        )
+        self.total_up_spin = QubitOperator_to_qmlHamiltonian(
+            jordan_wigner(_total_up_spin)
+        )
+        self.total_down_spin = QubitOperator_to_qmlHamiltonian(
+            jordan_wigner(_total_down_spin)
+        )
+        self.qudratic_hamiltonian = QubitOperator_to_qmlHamiltonian(
+            jordan_wigner(-1 * _horizontal_hopping + -1 * _vertical_hopping)
+        )
+
+        # up_spin_matrix = get_sparse_operator(_total_up_spin, n_qubits=self.n_qubits).todense()
+        # up_spin_matrix = torch.complex(torch.Tensor(up_spin_matrix.real), torch.Tensor(up_spin_matrix.imag)).to(self.device)
+        # down_spin_matrix = get_sparse_operator(_total_down_spin, n_qubits=self.n_qubits).todense()
+        # down_spin_matrix = torch.complex(torch.Tensor(down_spin_matrix.real), torch.Tensor(down_spin_matrix.imag)).to(self.device)
 
         self.params = nn.ParameterDict({
-            'theta_U': nn.Parameter(torch.zeros(reps), requires_grad=True),
+            'theta_U': nn.Parameter(torch.zeros(reps+1), requires_grad=True),
             'theta_v': nn.Parameter(torch.zeros(reps), requires_grad=True),
             'theta_h': nn.Parameter(torch.zeros(reps), requires_grad=True),
-            'theta_mu': nn.Parameter(torch.zeros(reps), requires_grad=True)
-        })
+        }).to(self.device)
 
-        self.ground_state_energy, self.ground_state_wf = get_ground_state(get_sparse_operator(self.fermionHamiltonian))
-        self.ground_state_wf = torch.Tensor(self.ground_state_wf)
+        self.ground_state_energy, self.ground_state_wf = jw_get_ground_state_at_particle_number(
+            sparse_operator=get_sparse_operator(self.fermionHamiltonian),
+            particle_number=self.n_electrons
+        )
+        self.ground_state_wf = torch.complex(
+            torch.Tensor(self.ground_state_wf.real), torch.Tensor(self.ground_state_wf.imag)
+        ).unsqueeze(-1).to(self.device)
+
+        # print('up_spin: ', self.ground_state_wf.conj().T @ up_spin_matrix @ self.ground_state_wf)
+        # print('down_spin: ', self.ground_state_wf.conj().T @ down_spin_matrix @ self.ground_state_wf)
+
         self.loss_history = []
         self.filename = f'./images/HVA-{x_dimension}x{y_dimension}, layers={reps}.png'
 
@@ -223,8 +256,7 @@ class HVA:
     def prepare_nonInteracting_groundState(self):
         
         initially_occupied_orbitals = list(range(self.n_electrons))
-        _, transformation_matrix, _ = self.nonInteractingHamiltonian.diagonalizing_bogoliubov_transform()
-        transformation_matrix = transformation_matrix[initially_occupied_orbitals]
+        transformation_matrix = self.transformation_matrix[initially_occupied_orbitals]
         circuit_description = slater_determinant_preparation_circuit(transformation_matrix)
 
         for q in initially_occupied_orbitals:
@@ -239,22 +271,17 @@ class HVA:
                     qml.SingleExcitation(2 * theta, wires=[i, j])
                     qml.RZ(phi, wires=j)
     
-    def get_circuit(self):
+    def circuit(self, theta_U, theta_v, theta_h):
         
         self.prepare_nonInteracting_groundState()
         
-        self.Trotterize_operator(self.params['theta_U'][0] / 2, self.coulomb_interaction)
         for rep in range(self.reps):
-            self.Trotterize_operator(self.params['theta_v'][rep], self.vertical_hopping)
-            self.Trotterize_operator(self.params['theta_h'][rep], self.horizontal_hopping)
-            self.Trotterize_operator(self.params['theta_mu'][rep], self.chemical_potential)
-            if rep != self.reps-1:
-                self.Trotterize_operator((self.params['theta_U'][rep] + self.params['theta_U'][rep+1]) / 2,
-                                         self.coulomb_interaction)
-            else:
-                self.Trotterize_operator(self.params['theta_U'][rep], self.coulomb_interaction)
+            self.Trotterize_operator(theta_U[0], self.coulomb_interaction)
+            self.Trotterize_operator(theta_v[rep], self.vertical_hopping)
+            self.Trotterize_operator(theta_h[rep], self.horizontal_hopping)
+        self.Trotterize_operator(theta_U[self.reps], self.coulomb_interaction)
 
-        return qml.expval(self.qmlHamiltonian)
+        return qml.expval(self.qmlHamiltonian), qml.expval(self.total_up_spin), qml.expval(self.total_down_spin), qml.expval(self.total_particle_operator)
 
     def run(self):
         
@@ -264,20 +291,20 @@ class HVA:
 
         dev = qml.device('default.qubit.torch', wires=self.n_qubits)
         opt = optim.Adam(params=self.params.values(), lr=self.lr)
-        circuit = self.get_circuit
+        circuit = self.circuit
         model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
 
         for i_epoch in range(self.n_epoch):
             
             opt.zero_grad()
-            loss = model()
+            loss, up_spin, down_spin, num_particle = model(*self.params.values())
             loss.backward()
             opt.step()
 
             self.loss_history.append(loss.item())
 
             if (i_epoch + 1) % 5 == 0:
-                print(f'epoch: {i_epoch+1}, energy: {loss.item()}')
+                print(f'epoch: {i_epoch+1}, energy: {loss.item()}, up spin: {up_spin.item()} down spin: {down_spin.item()} num particle: {num_particle.item()}')
             
             ax.clear()
             ax.plot(np.arange(i_epoch+1)+1, self.loss_history, marker='X', color='r', label='HVA')
@@ -288,21 +315,21 @@ class HVA:
             ax.grid()
 
             plt.pause(0.01)
+            plt.savefig(self.filename)
 
         plt.ioff()
         plt.show()
-        plt.savefig(self.filename)
     
 if __name__ == '__main__':
     vqe = HVA(
         n_epoch=200,
         lr=1e-2,
         threshold=1e-3,
-        reps=3,
+        reps=10,
         x_dimension=2,
         y_dimension=2,
         tunneling=1,
-        coulomb=4,
+        coulomb=2,
     )
 
     vqe.run()
