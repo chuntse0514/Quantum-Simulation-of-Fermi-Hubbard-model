@@ -159,6 +159,7 @@ class HVA:
                  lr: float,
                  threshold: float,
                  reps: int,
+                 init_strategy: str,
                  x_dimension: int,
                  y_dimension: int,
                  tunneling: float,
@@ -194,7 +195,7 @@ class HVA:
         self.fermionHamiltonian = -tunneling * _horizontal_hopping + \
                                   -tunneling * _vertical_hopping + \
                                   coulomb * _coulomb_interaction
-        
+
         self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(
             jordan_wigner(self.fermionHamiltonian)
         )
@@ -239,7 +240,7 @@ class HVA:
         # print('down_spin: ', self.ground_state_wf.conj().T @ down_spin_matrix @ self.ground_state_wf)
 
         self.loss_history = []
-        self.filename = f'./images/HVA-{x_dimension}x{y_dimension}, layers={reps}.png'
+        self.filename = f'./images/HVA-{x_dimension}x{y_dimension},t={tunneling}, U={coulomb}, layers={reps}, init={init_strategy}.png'
 
     def Trotterize_operator(self, theta, operator: QubitOperator):
         
@@ -271,17 +272,30 @@ class HVA:
                     qml.SingleExcitation(2 * theta, wires=[i, j])
                     qml.RZ(phi, wires=j)
     
-    def circuit(self, theta_U, theta_v, theta_h):
+    def circuit(self, theta_U, theta_h, theta_v):
         
         self.prepare_nonInteracting_groundState()
         
         for rep in range(self.reps):
-            self.Trotterize_operator(theta_U[0], self.coulomb_interaction)
+            self.Trotterize_operator(theta_U[rep], self.coulomb_interaction)
             self.Trotterize_operator(theta_v[rep], self.vertical_hopping)
             self.Trotterize_operator(theta_h[rep], self.horizontal_hopping)
         self.Trotterize_operator(theta_U[self.reps], self.coulomb_interaction)
 
         return qml.expval(self.qmlHamiltonian), qml.expval(self.total_up_spin), qml.expval(self.total_down_spin), qml.expval(self.total_particle_operator)
+
+    def state(self, theta_U, theta_h, theta_v):
+        
+        self.prepare_nonInteracting_groundState()
+        
+        for rep in range(self.reps):
+            self.Trotterize_operator(theta_U[rep], self.coulomb_interaction)
+            self.Trotterize_operator(theta_v[rep], self.vertical_hopping)
+            self.Trotterize_operator(theta_h[rep], self.horizontal_hopping)
+        self.Trotterize_operator(theta_U[self.reps], self.coulomb_interaction)
+
+        return qml.state()
+
 
     def run(self):
         
@@ -293,7 +307,7 @@ class HVA:
         opt = optim.Adam(params=self.params.values(), lr=self.lr)
         circuit = self.circuit
         model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
-
+        
         for i_epoch in range(self.n_epoch):
             
             opt.zero_grad()
@@ -323,7 +337,7 @@ class HVA:
 if __name__ == '__main__':
     vqe = HVA(
         n_epoch=200,
-        lr=1e-2,
+        lr=1e-3,
         threshold=1e-3,
         reps=10,
         x_dimension=2,
