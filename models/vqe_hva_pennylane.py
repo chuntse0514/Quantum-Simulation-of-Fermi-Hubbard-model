@@ -165,7 +165,8 @@ class HVA:
         self.reps = reps
         self.n_qubits = x_dimension * y_dimension * 2
         self.n_electrons = self.n_qubits // 2
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        # self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
 
         _horizontal_hopping = get_horizontal_hopping(
             x_dimension, y_dimension, periodic, spinless
@@ -194,6 +195,10 @@ class HVA:
         self.vertical_hopping = jordan_wigner(_vertical_hopping)
         self.coulomb_interaction = jordan_wigner(_coulomb_interaction)
         self.chemical_potential = jordan_wigner(_chemical_potential)
+        self.horizontal_hopping.compress()
+        self.vertical_hopping.compress()
+        self.coulomb_interaction.compress()
+        self.chemical_potential.compress()
         
         if init_strategy == 'Identity':
             self.params = nn.ParameterDict({
@@ -208,23 +213,23 @@ class HVA:
                 'theta_h': nn.Parameter((torch.rand(reps) * 2 - 1) * np.pi, requires_grad=True),
             }).to(self.device)
 
-        self.ground_state_energy, self.ground_state_wf = jw_get_ground_state_at_particle_number(
-            sparse_operator=get_sparse_operator(self.fermionHamiltonian),
-            particle_number=self.n_electrons
-        )
-        self.ground_state_wf = torch.complex(
-            torch.Tensor(self.ground_state_wf.real).double(), torch.Tensor(self.ground_state_wf.imag).double()
-        ).to(self.device)
+        # self.ground_state_energy, self.ground_state_wf = jw_get_ground_state_at_particle_number(
+        #     sparse_operator=get_sparse_operator(self.fermionHamiltonian),
+        #     particle_number=self.n_electrons
+        # )
+        # self.ground_state_wf = torch.complex(
+        #     torch.Tensor(self.ground_state_wf.real).double(), torch.Tensor(self.ground_state_wf.imag).double()
+        # ).to(self.device)
         self.loss_history = []
         self.filename = f'./images/HVA-{x_dimension}x{y_dimension},t={tunneling}, U={coulomb}, layers={reps}, init={init_strategy}.png'
 
     def Trotterize_operator(self, theta, operator: QubitOperator):
-        
-        for pauliString, _ in operator.terms.items():
 
+        for pauliString, _ in operator.terms.items():
+    
             if not pauliString:
                 continue
-            
+
             String = reduce(lambda a, b: a+b, [pauliString[i][1] for i in range(len(pauliString))])
             Indicies = [pauliString[i][0] for i in range(len(pauliString))]
             Pk = (String, Indicies)
@@ -248,27 +253,26 @@ class HVA:
                     i, j, theta, phi = op
                     qml.SingleExcitation(2 * theta, wires=[i, j])
                     qml.RZ(phi, wires=j)
+
+    def circuit(self, theta_U, theta_v, theta_h):
     
-    def get_circuit(self):
-        
         self.prepare_nonInteracting_groundState()
-        
-        self.Trotterize_operator(self.params['theta_U'][0] / 2, self.coulomb_interaction)
+
+        self.Trotterize_operator(theta_U[0] / 2, self.coulomb_interaction)
         for rep in range(self.reps):
-            self.Trotterize_operator(self.params['theta_v'][rep], self.vertical_hopping)
-            self.Trotterize_operator(self.params['theta_h'][rep], self.horizontal_hopping)
+            self.Trotterize_operator(theta_v[rep], self.vertical_hopping)
+            self.Trotterize_operator(theta_h[rep], self.horizontal_hopping)
             if rep != self.reps-1:
-                self.Trotterize_operator((self.params['theta_U'][rep] + self.params['theta_U'][rep+1]) / 2,
+                self.Trotterize_operator((theta_U[rep] + theta_U[rep+1]) / 2,
                                          self.coulomb_interaction)
             else:
-                self.Trotterize_operator(self.params['theta_U'][rep], self.coulomb_interaction)
+                self.Trotterize_operator(theta_U[rep], self.coulomb_interaction)
 
         return qml.expval(self.qmlHamiltonian)
 
-    def get_state(self):
+    def state(self):
         
         self.prepare_nonInteracting_groundState()
-        
         self.Trotterize_operator(self.params['theta_U'][0] / 2, self.coulomb_interaction)
         for rep in range(self.reps):
             self.Trotterize_operator(self.params['theta_v'][rep], self.vertical_hopping)
@@ -290,15 +294,25 @@ class HVA:
 
         dev = qml.device('default.qubit.torch', wires=self.n_qubits)
         opt = optim.NAdam(params=self.params.values(), lr=self.lr)
-        circuit = self.get_circuit
-        circuit2 = self.get_state
+        circuit = self.circuit
+        circuit2 = self.state
         model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
         model2 = qml.QNode(circuit2, dev, interface='torch', diff_method='backprop')
         
+        nums_frequency = {
+            'theta_U': {(i,): len(self.coulomb_interaction.terms)-1 for i in range(self.reps)},
+            'theta_v': {(i,): len(self.vertical_hopping.terms) for i in range(self.reps)},
+            'theta_h': {(i,): len(self.horizontal_hopping.terms) for i in range(self.reps)}
+        }
+
+        print(qml.draw(model)(*(self.params['theta_U'], self.params['theta_v'], self.params['theta_h'])))
+
+        return 
+
         for i_epoch in range(self.n_epoch):
             
             opt.zero_grad()
-            loss = model()
+            loss = model(self.params['theta_U'], self.params['theta_v'], self.params['theta_h'])
             state = model2()
             loss.backward()
             opt.step()
@@ -330,7 +344,7 @@ if __name__ == '__main__':
         n_epoch=200,
         lr=1e-3,
         threshold=1e-3,
-        reps=20,
+        reps=1,
         init_strategy='Identity',
         x_dimension=2,
         y_dimension=2,
