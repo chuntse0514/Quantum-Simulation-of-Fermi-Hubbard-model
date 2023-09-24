@@ -77,7 +77,8 @@ class HVA:
         self.reps = reps
         self.n_qubits = x_dimension * y_dimension * 2
         self.n_electrons = self.n_qubits // 2
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        # self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
 
         self.fermionHamiltonian = fermi_hubbard(
                                     x_dimension, y_dimension, tunneling, coulomb,
@@ -157,12 +158,12 @@ class HVA:
         return ground_state_energy.item(), ground_state_wf.to(self.device)
 
     def Trotterize_operator(self, theta, operator: QubitOperator):
-        
-        for pauliString, _ in operator.terms.items():
 
+        for pauliString, _ in operator.terms.items():
+    
             if not pauliString:
                 continue
-            
+
             String = reduce(lambda a, b: a+b, [pauliString[i][1] for i in range(len(pauliString))])
             Indicies = [pauliString[i][0] for i in range(len(pauliString))]
             Pk = (String, Indicies)
