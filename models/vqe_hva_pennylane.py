@@ -159,7 +159,6 @@ class HVA:
                  lr: float,
                  threshold: float,
                  reps: int,
-                 init_strategy: str,
                  x_dimension: int,
                  y_dimension: int,
                  tunneling: float,
@@ -175,8 +174,7 @@ class HVA:
         self.reps = reps
         self.n_qubits = x_dimension * y_dimension * 2
         self.n_electrons = self.n_qubits // 2
-        # self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.device = torch.device("cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         _horizontal_hopping = get_horizontal_hopping(
             x_dimension, y_dimension, periodic, spinless
@@ -241,7 +239,7 @@ class HVA:
         # print('down_spin: ', self.ground_state_wf.conj().T @ down_spin_matrix @ self.ground_state_wf)
 
         self.loss_history = []
-        self.filename = f'./images/HVA-{x_dimension}x{y_dimension},t={tunneling}, U={coulomb}, layers={reps}, init={init_strategy}.png'
+        self.filename = f'./images/HVA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, layers={reps}, lr={lr}).png'
 
     def Trotterize_operator(self, theta, operator: QubitOperator):
 
@@ -300,7 +298,6 @@ class HVA:
 
     def run(self):
         
-        plt.ion()
         fig = plt.figure(figsize=(12, 6))
         ax = fig.add_subplot(1, 1, 1)
 
@@ -319,7 +316,7 @@ class HVA:
             self.loss_history.append(loss.item())
 
             if (i_epoch + 1) % 5 == 0:
-                print(f'epoch: {i_epoch+1}, energy: {loss.item()}, up spin: {up_spin.item()} down spin: {down_spin.item()} num particle: {num_particle.item()}')
+                print(f'epoch: {i_epoch+1} | energy: {loss.item(): .6f} | up: {up_spin.item(): .2f} | down: {down_spin.item(): .2f} | particles: {num_particle.item(): .2f}')
             
             ax.clear()
             ax.plot(np.arange(i_epoch+1)+1, self.loss_history, marker='X', color='r', label='HVA')
@@ -329,11 +326,7 @@ class HVA:
             ax.legend()
             ax.grid()
 
-            plt.pause(0.01)
             plt.savefig(self.filename)
-
-        plt.ioff()
-        plt.show()
     
 if __name__ == '__main__':
     vqe = HVA(
@@ -344,7 +337,7 @@ if __name__ == '__main__':
         x_dimension=2,
         y_dimension=2,
         tunneling=1,
-        coulomb=2,
+        coulomb=0.1,
     )
 
     vqe.run()
