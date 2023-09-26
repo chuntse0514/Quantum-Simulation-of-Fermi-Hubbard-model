@@ -188,7 +188,6 @@ class DHA:
             self.selected_indices[channel] = selected_indices.tolist()
             self.max_grads[channel] = params.grad.cpu().numpy()[selected_indices].tolist()
 
-        self.train_params = nn.ParameterList([nn.Parameter(torch.zeros(len(self.max_grads)), requires_grad=True)]).to(self.device)
         self.train_params = nn.ParameterDict({
             channel: nn.Parameter(torch.zeros(len(gates)), requires_grad=True)
             for channel, gates in self.selected_gates.items()
@@ -242,14 +241,13 @@ class DHA:
 
             # Todo: Transform the Hamiltonian according to the parameters
             for channel, indices in list(self.selected_indices.items())[::-1]:
-                for index in indices:
+                for index, param in zip(indices, self.train_params[channel]):
                     generator = self.qubitOperatorPool[channel][index]
-                    param = self.train_params[channel][index].item()
                     for pauliString, coeff in list(generator.terms.items())[::-1]:
                         if not pauliString:
                             continue
 
-                        theta = param * coeff.real
+                        theta = param.item() * coeff.real
                         pauli = QubitOperator(pauliString)
                         first_term = np.sin(theta) * (-1j / 2) * (self.qubitHamiltonian * pauli - pauli * self.qubitHamiltonian)
                         second_term = 1 / 2 * (1 - np.cos(theta)) * (pauli * self.qubitHamiltonian * pauli - self.qubitHamiltonian)
@@ -257,7 +255,8 @@ class DHA:
                         self.qubitHamiltonian.compress()
 
             self.fermionHamiltonian = reverse_jordan_wigner(self.qubitHamiltonian)
-            self.fermionHamiltonian.compress()
+            self.fermionHamiltonian.compress(1e-6)
+            self.qubitHamiltonian.compress(1e-6)
 
             self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(self.qubitHamiltonian)
 

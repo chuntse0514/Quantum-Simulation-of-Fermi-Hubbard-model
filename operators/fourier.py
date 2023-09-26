@@ -52,7 +52,10 @@ def fourier_transform(hamiltonian, Nx, Ny):
             for k in range(n_sites):
                 kx, ky = index2tuple(k, spin=False)
                 k_sigma = tuple2index(kx, ky, spin)
-                FT_basis += FermionOperator((k_sigma, ladder), np.exp(-1j * 2 * np.pi * (kx * rx / Nx + ky * ry / Ny)) / np.sqrt(n_sites))
+                if ladder:
+                    FT_basis += FermionOperator((k_sigma, ladder), np.exp(1j * 2 * np.pi * (kx * rx / Nx + ky * ry / Ny)) / np.sqrt(n_sites))
+                else:
+                    FT_basis += FermionOperator((k_sigma, ladder), np.exp(-1j * 2 * np.pi * (kx * rx / Nx + ky * ry / Ny)) / np.sqrt(n_sites))
 
             FT_term *= FT_basis
         FT_hamiltonian += FT_term * coeff
