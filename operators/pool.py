@@ -134,9 +134,9 @@ def hubbard_interaction_pool(Nx, Ny):
     hubbard_interaction_channel = {
         'ZS channel': [],
         'ZS2 channel': [],
-        'W channel': [],
+        # 'W channel': [],
         'BCS channel': [],
-        'BCS2 channel': []
+        # 'BCS2 channel': []
     }
 
     def tuple2index(ix, iy, spin):
@@ -165,7 +165,8 @@ def hubbard_interaction_pool(Nx, Ny):
                     i3 = tuple2index(kx2, ky2, spin^1)
                     i4 = tuple2index(kx1, ky1, spin)
                     hubbard_interaction_channel['ZS channel'] += [
-                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}')
+                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) -
+                        FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j) 
                     ]
 
 
@@ -176,7 +177,8 @@ def hubbard_interaction_pool(Nx, Ny):
                     i3 = tuple2index(kx2, ky2, spin)
                     i4 = tuple2index(kx1, ky1, spin^1)
                     hubbard_interaction_channel['ZS2 channel'] += [
-                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}')
+                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) -
+                        FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j)
                     ]
 
 
@@ -187,7 +189,8 @@ def hubbard_interaction_pool(Nx, Ny):
                     i3 = tuple2index((-kx2+qx) % Nx, (-ky2+qy) % Ny, spin^1)
                     i4 = tuple2index(kx2, ky2, spin)
                     hubbard_interaction_channel['BCS channel'] += [
-                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}')
+                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) -
+                        FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j)
                     ]
 
 
