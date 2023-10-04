@@ -23,6 +23,9 @@ from operators.pool import hubbard_interaction_pool
 from functools import reduce, partial
 
 def Trotterize_generator(theta, generator: QubitOperator):
+
+    if isinstance(generator, FermionOperator):
+        generator = jordan_wigner(generator)
     
     for pauliString, coeff in generator.terms.items():
         if not pauliString:
@@ -101,6 +104,7 @@ class DHA:
             channel: nn.Parameter(torch.zeros(len(generators)), requires_grad=True)
             for channel, generators in self.fermionOperatorPool.items()
         }).to(self.device)
+        self.rz_params = nn.ParameterList([nn.Parameter(torch.zeros(self.n_qubits), requires_grad=True)])
         self.loss_history = {
             'epoch': [],
             'iteration': []
@@ -153,18 +157,29 @@ class DHA:
         if mode == 'eval-grad':
             for i in range(self.n_electrons):
                 qml.PauliX(wires=i)
+            # qml.SingleExcitation(np.pi/2, wires=[2, 4])
+            # qml.SingleExcitation(np.pi/2, wires=[3, 5])
+
             for channel, gates in self.gatesOperatorPool.items():
                 for i, gate in enumerate(gates):
                     gate(self.eval_params[channel][i])
+            
+            for i in range(self.n_qubits):
+                qml.RZ(self.rz_params[0][i], wires=i)
 
             return qml.expval(self.qmlHamiltonian)
 
         elif mode == 'train':
             for i in range(self.n_electrons):
                 qml.PauliX(wires=i)
+            # qml.SingleExcitation(np.pi/2, wires=[2, 4])
+            # qml.SingleExcitation(np.pi/2, wires=[3, 5])
+
             for channel, gates in self.selected_gates.items():
                 for i, gate in enumerate(gates):
                     gate(self.train_params[channel][i])
+            for i in range(self.n_qubits):
+                qml.RZ(self.rz_params[0][i], wires=i)
 
             return qml.expval(self.qmlHamiltonian)
 
@@ -260,9 +275,11 @@ class DHA:
 
             self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(self.qubitHamiltonian)
 
-            print('----transformed hamiltonian----')
-            print(self.fermionHamiltonian)
-            print('')
+            # print('----transformed hamiltonian----')
+            # print(self.fermionHamiltonian)
+            # print('')
+
+            print([params for params in self.train_params.values()])
 
             ##############################
             
@@ -304,3 +321,4 @@ if __name__ == '__main__':
     )
 
     vqe.run()
+    

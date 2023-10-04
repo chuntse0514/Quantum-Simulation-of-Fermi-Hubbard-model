@@ -209,12 +209,12 @@ class HVA:
         self.prepare_nonInteracting_groundState()
         
         for rep in range(self.reps):
-            self.Trotterize_operator(theta_U[rep], self.hvaGenerators['coulomb'])
+            # self.Trotterize_operator(theta_U[rep], self.hvaGenerators['coulomb'])
             for i in range(self.Nv):
                 self.Trotterize_operator(theta_v[rep * self.Nv + i], self.hvaGenerators['vertical'][i])
             for i in range(self.Nh):
                 self.Trotterize_operator(theta_h[rep * self.Nh + i], self.hvaGenerators['horizontal'][i])
-        self.Trotterize_operator(theta_U[self.reps], self.hvaGenerators['coulomb'])
+        # self.Trotterize_operator(theta_U[self.reps], self.hvaGenerators['coulomb'])
 
         return qml.state()
 
@@ -274,7 +274,7 @@ if __name__ == '__main__':
         n_epoch=200,
         lr=1e-2,
         threshold=1e-3,
-        reps=3,
+        reps=10,
         x_dimension=2,
         y_dimension=3,
         tunneling=1,
