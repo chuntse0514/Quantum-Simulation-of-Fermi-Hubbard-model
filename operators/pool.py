@@ -130,7 +130,7 @@ def spin_complemented_pool(n_electrons,
 
     return pool
 
-def hubbard_interaction_pool(Nx, Ny):
+def hubbard_interaction_pool(Nx, Ny, hermitian=False):
 
     hubbard_interaction_channel = {
         'ZS channel': [],
@@ -165,10 +165,18 @@ def hubbard_interaction_pool(Nx, Ny):
                     i2 = tuple2index((kx2-qx) % Nx, (ky2-qy) % Ny, spin^1)
                     i3 = tuple2index(kx2, ky2, spin^1)
                     i4 = tuple2index(kx1, ky1, spin)
-                    hubbard_interaction_channel['ZS channel'] += [
-                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) -
-                        FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j) 
-                    ]
+                    if hermitian:
+                        hubbard_interaction_channel['ZS channel'] += [
+                            FermionOperator(f'{i1}^ {i2}^ {i3} {i4}') +
+                            FermionOperator(f'{i3}^ {i4}^ {i1} {i2}')
+                        ]
+                    else:
+                        operator = FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) - \
+                                   FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j) 
+                        operator = normal_ordered(operator)
+                        if operator not in hubbard_interaction_channel['ZS channel'] and \
+                          -operator not in hubbard_interaction_channel['ZS channel']:
+                            hubbard_interaction_channel['ZS channel'].append(operator)
 
 
                     # ZS2 channel
@@ -177,10 +185,16 @@ def hubbard_interaction_pool(Nx, Ny):
                     i2 = tuple2index((kx2-qx) % Nx, (ky2-qy) % Ny, spin^1)
                     i3 = tuple2index(kx2, ky2, spin)
                     i4 = tuple2index(kx1, ky1, spin^1)
-                    hubbard_interaction_channel['ZS2 channel'] += [
-                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) -
-                        FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j)
-                    ]
+                    if hermitian:
+                        hubbard_interaction_channel['ZS2 channel'] += [
+                            FermionOperator(f'{i1}^ {i2}^ {i3} {i4}') +
+                            FermionOperator(f'{i3}^ {i4}^ {i1} {i2}')
+                        ]
+                    else:
+                        hubbard_interaction_channel['ZS2 channel'] += [
+                            FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) -
+                            FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j) 
+                        ]
 
 
                     # BCS channel
@@ -189,13 +203,56 @@ def hubbard_interaction_pool(Nx, Ny):
                     i2 = tuple2index((-kx1+qx) % Nx, (-ky1+qy) % Ny, spin^1)
                     i3 = tuple2index((-kx2+qx) % Nx, (-ky2+qy) % Ny, spin^1)
                     i4 = tuple2index(kx2, ky2, spin)
-                    hubbard_interaction_channel['BCS channel'] += [
-                        FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) -
-                        FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j)
-                    ]
+                    if hermitian:
+                        hubbard_interaction_channel['BCS channel'] += [
+                            FermionOperator(f'{i1}^ {i2}^ {i3} {i4}') +
+                            FermionOperator(f'{i3}^ {i4}^ {i1} {i2}')
+                        ]
+                    else:
+                        hubbard_interaction_channel['BCS channel'] += [
+                            FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) -
+                            FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j) 
+                        ]
 
 
     return hubbard_interaction_channel
+
+def hubbard_interaction_pool_simplified(Nx, Ny):
+
+    hubbard_interaction_pool = []
+    n_sites = Nx * Ny
+
+    def tuple2index(ix, iy, spin):
+        return 2 * (ix + iy * Nx) + spin 
+    def index2tuple(index, spin=False):
+        if spin:
+            return ((index // 2) % Nx, (index // 2) // Nx, index % 2)
+        else:
+            return (index % Nx, index // Nx)
+
+    for spin in (0, 1):
+        for k1 in range(n_sites):
+            for k2 in range(n_sites):
+                for q in range(n_sites):
+                    
+                    if q == 0:
+                        continue
+
+                    kx1, ky1 = index2tuple(k1, spin=False)
+                    kx2, ky2 = index2tuple(k2, spin=False)
+                    qx, qy = index2tuple(q, spin=False)
+
+                    i1 = tuple2index((kx1+qx) % Nx, (ky1+qy) % Ny, spin)
+                    i2 = tuple2index((kx2-qx) % Nx, (ky2-qy) % Ny, spin^1)
+                    i3 = tuple2index(kx2, ky2, spin^1)
+                    i4 = tuple2index(kx1, ky1, spin)
+
+                    operator = FermionOperator(f'{i1}^ {i2}^ {i3} {i4}', 1j) - FermionOperator(f'{i3}^ {i4}^ {i1} {i2}', 1j)
+                    operator = normal_ordered(operator)
+                    if operator not in hubbard_interaction_pool and -operator not in hubbard_interaction_pool:
+                        hubbard_interaction_pool.append(operator)
+
+    return hubbard_interaction_pool
 
 def hubbard_interation_pool_modified(Nx, Ny):
 
@@ -281,3 +338,27 @@ def hubbard_interation_pool_modified(Nx, Ny):
                                                       hubbard_interaction_channel[channel])
     
     return hubbard_interaction_channel
+
+def general_operator_pool(Nx, Ny):
+
+    n_sites = Nx * Ny
+    n_spin_orbitals = Nx * Ny * 2
+    operator_pool = []
+
+    for k1 in range(n_spin_orbitals):
+        for k2 in range(n_spin_orbitals):
+
+            if k1 != k2:
+                op = normal_ordered(FermionOperator(f'{k1}^ {k2}', 1j) - FermionOperator(f'{k2}^ {k1}', 1j))
+                if op not in operator_pool:
+                    operator_pool.append(op)
+
+            for k3 in range(n_spin_orbitals):
+                for k4 in range(n_spin_orbitals):
+                    if k1 != k2 != k3 != k4:
+                        op = normal_ordered(FermionOperator(f'{k1}^ {k2}^ {k3} {k4}', 1j) - FermionOperator(f'{k3}^ {k4}^ {k1} {k2}', 1j))
+                        if op not in operator_pool:
+                            operator_pool.append(op)
+
+
+    return operator_pool
