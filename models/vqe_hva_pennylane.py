@@ -10,7 +10,6 @@ from openfermion import (
     jordan_wigner,
     number_operator,
     get_sparse_operator,
-    jw_get_ground_state_at_particle_number,
 )
 from openfermion.circuits import slater_determinant_preparation_circuit
 from openfermion.utils.indexing import down_index, up_index
@@ -20,6 +19,7 @@ from .utils import (
     PauliStringRotation,
     get_hva_commuting_hopping_terms
 )
+from linalg.exact_diagonalization import jw_get_ground_state
 from operators.fourier import fourier_transform_matrix
 from operators.tools import get_quadratic_term, get_interacting_term
 from functools import reduce
@@ -135,9 +135,11 @@ class HVA:
         # If the file does not exist, calculate the ground state energy and wavefunction, 
         # and then save them as a file
         else:
-            ground_state_energy, ground_state_wf = jw_get_ground_state_at_particle_number(
+            ground_state_energy, ground_state_wf = jw_get_ground_state(
                                                         sparse_operator=get_sparse_operator(self.fermionHamiltonian),
-                                                        particle_number=self.n_electrons
+                                                        particle_number=self.n_electrons,
+                                                        spin_up=self.n_electrons // 2,
+                                                        spin_down=self.n_electrons // 2
                                                     )
             ground_state_energy = torch.Tensor([ground_state_energy]).double()
             ground_state_wf = torch.complex(
@@ -166,7 +168,7 @@ class HVA:
             String = reduce(lambda a, b: a+b, [pauliString[i][1] for i in range(len(pauliString))])
             Indicies = [pauliString[i][0] for i in range(len(pauliString))]
             Pk = (String, Indicies)
-            PauliStringRotation(theta, Pk)
+            PauliStringRotation(2 * theta, Pk)
     
     def prepare_nonInteracting_groundState(self):
         
@@ -231,6 +233,12 @@ class HVA:
 
         state_eval_circuit = self.state
         model2 = qml.QNode(state_eval_circuit, dev, interface='torch', diff_method='backprop')
+
+        def closure():
+            opt.zero_grad()
+            loss, up_spin, down_spin, num_particle = model(*self.params.values())
+            loss.backward()
+            return loss
         
         for i_epoch in range(self.n_epoch):
             
@@ -240,6 +248,11 @@ class HVA:
             fidelity = torch.inner(state.conj(), self.ground_state_wf).abs() ** 2
             loss.backward()
             opt.step()
+
+            # opt.step(closure)
+            # loss, up_spin, down_spin, num_particle = model(*self.params.values())
+            # state = model2(*self.params.values())
+            # fidelity = torch.inner(state.conj(), self.ground_state_wf).abs() ** 2
 
             self.loss_history.append(loss.item())
             self.fidelity_history.append(fidelity.item())
@@ -268,11 +281,28 @@ if __name__ == '__main__':
         n_epoch=200,
         lr=1e-2,
         threshold=1e-3,
-        reps=3,
+        reps=10,
         x_dimension=2,
         y_dimension=3,
         tunneling=1,
         coulomb=0.1,
     )
-
+    
     vqe.run()
+
+    # from openfermion import get_sparse_operator
+
+    # gnd_energy, gnd_wave_fn = vqe.get_ground_state()
+    # particle = get_sparse_operator(vqe.fermionOperators['particle number']).todense()
+    # up = get_sparse_operator(vqe.fermionOperators['up spin'], n_qubits=12).todense()
+    # down = get_sparse_operator(vqe.fermionOperators['down spin'], n_qubits=12).todense()
+
+    # particle = torch.complex(torch.Tensor(particle.real).double(), torch.Tensor(particle.imag).double()).to(vqe.device)
+    # up = torch.complex(torch.Tensor(up.real).double(), torch.Tensor(up.imag).double()).to(vqe.device)
+    # down = torch.complex(torch.Tensor(down.real).double(), torch.Tensor(down.imag).double()).to(vqe.device)
+    # print(gnd_energy)
+    # print(gnd_wave_fn.conj() @ particle @ gnd_wave_fn)
+    # print(gnd_wave_fn.conj() @ up @ gnd_wave_fn)
+    # print(gnd_wave_fn.conj() @ down @ gnd_wave_fn)
+
+    
