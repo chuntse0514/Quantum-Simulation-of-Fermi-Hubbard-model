@@ -31,6 +31,7 @@ def QubitOperator_to_qmlHamiltonian(op: QubitOperator, mapper=jordan_wigner):
 
     if isinstance(op, FermionOperator):
         op = mapper(op)
+    op.compress()
 
     pauliDict = {
         'X': qml.PauliX,
