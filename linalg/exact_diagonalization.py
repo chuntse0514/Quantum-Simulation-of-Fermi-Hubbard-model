@@ -78,6 +78,10 @@ def jw_get_ground_state_for_3x3(sparse_operator, particle_number, spin_up, spin_
                          15: 11, 16: 8,  17: 9}
         return map_table[index]
     
+    def reflect_index(index, axis):
+        if axis == 'x':
+            map_table = {0: 0, 1: 1}
+    
     def rotate_basis(basis_index, degree):
         
         bin_index = bin(basis_index)[2:].zfill(18)
@@ -106,6 +110,8 @@ def jw_get_ground_state_for_3x3(sparse_operator, particle_number, spin_up, spin_
     state_3 = rotate(state_2, degree=180)
 
     state_4 = (state_2 + state_3) / 2
+
+    psi_s = state_4 / np.linalg.norm(state_4, ord=2)
 
 
 
