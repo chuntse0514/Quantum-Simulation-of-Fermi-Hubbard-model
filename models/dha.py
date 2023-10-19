@@ -247,22 +247,22 @@ class DHA:
 
     def get_ground_state_properties(self):
         
-        up = get_sparse_operator(self.fermionOperators['spin up'], n_qubits=self.n_qubits)
-        down = get_sparse_operator(self.fermionOperators['spin down'], n_qubits=self.n_qubits)
-        Sz = get_sparse_operator(self.fermionOperators['Sz'], n_qubits=self.n_qubits)
-        S_square = get_sparse_operator(self.fermionOperators['S^2'], n_qubits=self.n_qubits)
+        # up = get_sparse_operator(self.fermionOperators['spin up'], n_qubits=self.n_qubits)
+        # down = get_sparse_operator(self.fermionOperators['spin down'], n_qubits=self.n_qubits)
+        # Sz = get_sparse_operator(self.fermionOperators['Sz'], n_qubits=self.n_qubits)
+        # S_square = get_sparse_operator(self.fermionOperators['S^2'], n_qubits=self.n_qubits)
 
-        up_spin_value = (self.ground_state_wf.conj().transpose() @ up @ self.ground_state_wf).real[0, 0]
-        down_spin_value = (self.ground_state_wf.conj().transpose() @ down @ self.ground_state_wf).real[0, 0]
-        Sz_value = (self.ground_state_wf.conj().transpose() @ Sz @ self.ground_state_wf).real[0, 0]
-        S_square_value = (self.ground_state_wf.conj().transpose() @ S_square @ self.ground_state_wf).real[0, 0]
+        # up_spin_value = (self.ground_state_wf.conj().transpose() @ up @ self.ground_state_wf).real[0, 0]
+        # down_spin_value = (self.ground_state_wf.conj().transpose() @ down @ self.ground_state_wf).real[0, 0]
+        # Sz_value = (self.ground_state_wf.conj().transpose() @ Sz @ self.ground_state_wf).real[0, 0]
+        # S_square_value = (self.ground_state_wf.conj().transpose() @ S_square @ self.ground_state_wf).real[0, 0]
         
         print('ground state energy: ', self.ground_state_energy)
         print('particle number: ', self.n_electrons)
-        print('spin up:', np.round(up_spin_value, decimals=6))
-        print('spin down:', np.round(down_spin_value, decimals=6))
-        print('Sz: ', np.round(Sz_value, decimals=6))
-        print('S^2: ', np.round(S_square_value, decimals=6))
+        # print('spin up:', np.round(up_spin_value, decimals=6))
+        # print('spin down:', np.round(down_spin_value, decimals=6))
+        # print('Sz: ', np.round(Sz_value, decimals=6))
+        # print('S^2: ', np.round(S_square_value, decimals=6))
         print('')
 
     def save_model(self):
@@ -295,8 +295,13 @@ class DHA:
     
     def select_operator(self):
         
-        dev = qml.device('lightning.gpu', wires=self.n_qubits)
-        model = qml.QNode(self.circuit, dev, interface='torch', diff_method='adjoint')
+        if self.n_qubits < 20:
+            dev = qml.device('default.qubit.torch', wires=self.n_qubits)
+            diff_method = 'backprop'
+        else:
+            dev = qml.device('lightning.gpu', wires=self.n_qubits)
+            diff_method = 'adjoint'
+        model = qml.QNode(self.circuit, dev, interface='torch', diff_method=diff_method)
         loss = model(mode='eval')
         loss.backward()
         grads = self.params['e'].grad.cpu().numpy()
@@ -356,13 +361,18 @@ class DHA:
 
     def run(self):
         
-        # self.get_ground_state_properties()
+        self.get_ground_state_properties()
 
         fig = plt.figure(figsize=(12, 6))
         ax1 = fig.add_subplot(1, 2, 1)
         ax2 = fig.add_subplot(1, 2, 2)
 
-        dev = qml.device('lightning.gpu', wires=self.n_qubits)
+        if self.n_qubits < 20:
+            dev = qml.device('default.qubit.torch', wires=self.n_qubits)
+            diff_method = 'backprop'
+        else:
+            dev = qml.device('lightning.gpu', wires=self.n_qubits)
+            diff_method = 'adjoint'
         ground_state_wf = torch.complex(torch.Tensor(self.ground_state_wf.real.todense()).view(-1).double(), 
                                         torch.Tensor(self.ground_state_wf.imag.todense()).view(-1).double()).to(self.device)
 
@@ -391,8 +401,9 @@ class DHA:
             
             while True:
                 
-                model = qml.QNode(self.circuit, dev, interface='torch', diff_method='adjoint')
+                model = qml.QNode(self.circuit, dev, interface='torch', diff_method=None)
                 state = model(mode='state')
+                state = torch.complex(torch.Tensor(state.real).double(), torch.Tensor(state.imag).double()).to(self.device)
                 fidelity = torch.inner(ground_state_wf.conj(), state).abs() ** 2
                 
                 # Delete the unused state, release the memory of GPU device
@@ -400,7 +411,7 @@ class DHA:
                 torch.cuda.empty_cache()
                 gc.collect()
 
-                model = qml.QNode(self.circuit, dev, interface='torch', diff_method='adjoint')
+                model = qml.QNode(self.circuit, dev, interface='torch', diff_method=diff_method)
                 opt.zero_grad()
                 loss, Sz, S_square = model(mode='train')
                 loss.backward()
@@ -457,13 +468,13 @@ if __name__ == '__main__':
         threshold1=1e-2,
         threshold2=1e-2,
         x_dimension=2,
-        y_dimension=2,
-        n_electrons=4,
-        n_spin_up=2,
-        n_spin_down=2,
+        y_dimension=4,
+        n_electrons=8,
+        n_spin_up=4,
+        n_spin_down=4,
         tunneling=1,
-        coulomb=2,
-        # load_model=True
+        coulomb=6,
+        load_model=True
     )
-    vqe.get_ground_state_properties()
-    # vqe.run()
+    # vqe.get_ground_state_properties()
+    vqe.run()

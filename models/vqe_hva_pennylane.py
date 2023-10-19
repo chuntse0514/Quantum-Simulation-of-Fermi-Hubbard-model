@@ -222,7 +222,6 @@ class HVA:
 
     def run(self):
         
-        plt.ion()
         fig = plt.figure(figsize=(12, 6))
         ax1 = fig.add_subplot(1, 2, 1)
         ax2 = fig.add_subplot(1, 2, 2)
@@ -275,11 +274,7 @@ class HVA:
             ax2.set_ylabel('fidelity')
             ax2.grid()
 
-            plt.pause(0.01)
             plt.savefig(self.filename)
-
-        plt.ioff()
-        plt.show()
     
 if __name__ == '__main__':
     vqe = HVA(
@@ -290,7 +285,7 @@ if __name__ == '__main__':
         x_dimension=2,
         y_dimension=3,
         tunneling=1,
-        coulomb=2,
+        coulomb=0.1,
     )
     
     vqe.run()

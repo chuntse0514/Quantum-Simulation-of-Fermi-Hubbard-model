@@ -20,7 +20,7 @@ from .utils import (
     QubitOperator_to_qmlHamiltonian,
     PauliStringRotation
 )
-from linalg.exact_diagonalization import jw_get_ground_state
+from linalg.exact_diagonalization import jw_get_ground_state_for_3x3
 from operators.fourier import fourier_transform_matrix, fourier_transform
 from operators.tools import get_interacting_term, get_quadratic_term
 from operators.pool import hubbard_interaction_pool_simplified
@@ -196,7 +196,7 @@ class DHA:
         self.wf_filepath = f'./results/ground_state_results/Hubbard-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}).pkl'
         self.result_filepath = f'./results/vqe_results/DHA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pkl'
         self.model_filepath = f'./results/saved_model/DHA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pkl'
-        self.ground_state_energy, self.ground_state_wf = self.get_ground_state()
+        self.ground_state_energy, self.ground_state_wfs = self.get_ground_state()
         
         if load_model:
             self.load_model()
@@ -224,45 +224,46 @@ class DHA:
             with open(self.wf_filepath, 'rb') as file:
                 loaded_state_dict = pickle.load(file)
                 ground_state_energy = loaded_state_dict['energy']
-                ground_state_wf = loaded_state_dict['wave function']
+                ground_state_wfs = loaded_state_dict['wave function']
         
         # If the file does not exist, calculate the ground state energy and wavefunction, 
         # and then save them as a file
         else:
-            ground_state_energy, ground_state_wf = jw_get_ground_state(
+            ground_state_energy, ground_state_wfs = jw_get_ground_state_for_3x3(
                                                         sparse_operator=get_sparse_operator(self.fermionHamiltonian),
                                                         particle_number=self.n_electrons,
                                                         spin_up=self.n_spin_up,
                                                         spin_down=self.n_spin_down
                                                     )
-            ground_state_wf = csc_matrix(ground_state_wf.reshape(-1, 1))
+            ground_state_wfs = [csc_matrix(ground_state_wf.reshape(-1, 1))
+                                for ground_state_wf in ground_state_wfs]
             state_dict = {
                 'energy': ground_state_energy,
-                'wave function': ground_state_wf
+                'wave function': ground_state_wfs
             }
             with open(self.wf_filepath, 'wb') as file:
                 pickle.dump(state_dict, file)
 
-        return ground_state_energy, ground_state_wf
+        return ground_state_energy, ground_state_wfs
 
     def get_ground_state_properties(self):
         
-        up = get_sparse_operator(self.fermionOperators['spin up'], n_qubits=self.n_qubits)
-        down = get_sparse_operator(self.fermionOperators['spin down'], n_qubits=self.n_qubits)
-        Sz = get_sparse_operator(self.fermionOperators['Sz'], n_qubits=self.n_qubits)
-        S_square = get_sparse_operator(self.fermionOperators['S^2'], n_qubits=self.n_qubits)
+        # up = get_sparse_operator(self.fermionOperators['spin up'], n_qubits=self.n_qubits)
+        # down = get_sparse_operator(self.fermionOperators['spin down'], n_qubits=self.n_qubits)
+        # Sz = get_sparse_operator(self.fermionOperators['Sz'], n_qubits=self.n_qubits)
+        # S_square = get_sparse_operator(self.fermionOperators['S^2'], n_qubits=self.n_qubits)
 
-        up_spin_value = (self.ground_state_wf.conj().transpose() @ up @ self.ground_state_wf).real[0, 0]
-        down_spin_value = (self.ground_state_wf.conj().transpose() @ down @ self.ground_state_wf).real[0, 0]
-        Sz_value = (self.ground_state_wf.conj().transpose() @ Sz @ self.ground_state_wf).real[0, 0]
-        S_square_value = (self.ground_state_wf.conj().transpose() @ S_square @ self.ground_state_wf).real[0, 0]
+        # up_spin_value = (self.ground_state_wf.conj().transpose() @ up @ self.ground_state_wf).real[0, 0]
+        # down_spin_value = (self.ground_state_wf.conj().transpose() @ down @ self.ground_state_wf).real[0, 0]
+        # Sz_value = (self.ground_state_wf.conj().transpose() @ Sz @ self.ground_state_wf).real[0, 0]
+        # S_square_value = (self.ground_state_wf.conj().transpose() @ S_square @ self.ground_state_wf).real[0, 0]
         
         print('ground state energy: ', self.ground_state_energy)
         print('particle number: ', self.n_electrons)
-        print('spin up:', np.round(up_spin_value, decimals=6))
-        print('spin down:', np.round(down_spin_value, decimals=6))
-        print('Sz: ', np.round(Sz_value, decimals=6))
-        print('S^2: ', np.round(S_square_value, decimals=6))
+        # print('spin up:', np.round(up_spin_value, decimals=6))
+        # print('spin down:', np.round(down_spin_value, decimals=6))
+        # print('Sz: ', np.round(Sz_value, decimals=6))
+        # print('S^2: ', np.round(S_square_value, decimals=6))
         print('')
 
     def save_model(self):
@@ -295,8 +296,13 @@ class DHA:
     
     def select_operator(self):
         
-        dev = qml.device('lightning.gpu', wires=self.n_qubits)
-        model = qml.QNode(self.circuit, dev, interface='torch', diff_method='adjoint')
+        if self.n_qubits < 20:
+            dev = qml.device('default.qubit.torch', wires=self.n_qubits)
+            diff_method = 'backprop'
+        else:
+            dev = qml.device('lightning.gpu', wires=self.n_qubits)
+            diff_method = 'adjoint'
+        model = qml.QNode(self.circuit, dev, interface='torch', diff_method=diff_method)
         loss = model(mode='eval')
         loss.backward()
         grads = self.params['e'].grad.cpu().numpy()
@@ -354,18 +360,32 @@ class DHA:
         elif mode == 'eval':
             return qml.expval(self.qmlHamiltonian)
 
+    def calculate_fidelity(self, ground_state_wfs, state):
+
+        projected_state = torch.zeros_like(state, dtype=torch.complex128).to(self.device)
+        for ground_state_wf in ground_state_wfs:
+            coeff = torch.inner(ground_state_wf.conj(), state)
+            projected_state += coeff * ground_state_wf
+        projected_state = projected_state / torch.linalg.vector_norm(projected_state)
+        return torch.inner(projected_state.conj(), state).abs() ** 2
+
     def run(self):
         
-        # self.get_ground_state_properties()
+        self.get_ground_state_properties()
 
         fig = plt.figure(figsize=(12, 6))
         ax1 = fig.add_subplot(1, 2, 1)
         ax2 = fig.add_subplot(1, 2, 2)
 
-        dev = qml.device('lightning.gpu', wires=self.n_qubits)
-        ground_state_wf = torch.complex(torch.Tensor(self.ground_state_wf.real.todense()).view(-1).double(), 
-                                        torch.Tensor(self.ground_state_wf.imag.todense()).view(-1).double()).to(self.device)
-
+        if self.n_qubits < 20:
+            dev = qml.device('default.qubit.torch', wires=self.n_qubits)
+            diff_method = 'backprop'
+        else:
+            dev = qml.device('lightning.gpu', wires=self.n_qubits)
+            diff_method = 'adjoint'
+        ground_state_wfs = [torch.complex(torch.Tensor(ground_state_wf.real.todense()).view(-1).double(), 
+                                          torch.Tensor(ground_state_wf.imag.todense()).view(-1).double()).to(self.device)
+                            for ground_state_wf in self.ground_state_wfs]
         i_epoch = len(self.results['epoch loss'])
 
         while i_epoch < self.n_epoch:
@@ -391,16 +411,17 @@ class DHA:
             
             while True:
                 
-                model = qml.QNode(self.circuit, dev, interface='torch', diff_method='adjoint')
+                model = qml.QNode(self.circuit, dev, interface='torch', diff_method=None)
                 state = model(mode='state')
-                fidelity = torch.inner(ground_state_wf.conj(), state).abs() ** 2
+                state = torch.complex(torch.Tensor(state.real).double(), torch.Tensor(state.imag).double()).to(self.device)
+                fidelity = self.calculate_fidelity(ground_state_wfs, state)
                 
                 # Delete the unused state, release the memory of GPU device
                 del state, model
                 torch.cuda.empty_cache()
                 gc.collect()
 
-                model = qml.QNode(self.circuit, dev, interface='torch', diff_method='adjoint')
+                model = qml.QNode(self.circuit, dev, interface='torch', diff_method=diff_method)
                 opt.zero_grad()
                 loss, Sz, S_square = model(mode='train')
                 loss.backward()
@@ -462,8 +483,8 @@ if __name__ == '__main__':
         n_spin_up=5,
         n_spin_down=4,
         tunneling=1,
-        coulomb=2,
+        coulomb=4,
         # load_model=True
     )
-    vqe.get_ground_state_properties()
-    # vqe.run()
+    # vqe.get_ground_state_properties()
+    vqe.run()
