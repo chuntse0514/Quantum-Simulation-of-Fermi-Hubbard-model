@@ -202,9 +202,10 @@ def jw_get_ground_state_for_3x3(sparse_operator, particle_number, spin_up, spin_
         eigvals, eigvecs = np.linalg.eigh(dense_restricted_operator)
     else:
         eigvals, eigvecs = scipy.sparse.linalg.eigsh(restricted_operator,
-                                                     k=4,
+                                                     k=10,
                                                      which='SA')
-
+    for eigval in eigvals:
+        print(eigval)
     expanded_states = []
     for k in range(4):
         state = eigvecs[:, k]
@@ -212,6 +213,49 @@ def jw_get_ground_state_for_3x3(sparse_operator, particle_number, spin_up, spin_
         expanded_state[jw_number_spin_indices(particle_number, spin_up, spin_down, n_qubits)] = state
         expanded_states.append(expanded_state)
 
+    # print('01', expanded_states[0].conj() @ expanded_states[1])
+    # print('02', expanded_states[0].conj() @ expanded_states[2])
+    # print('03', expanded_states[0].conj() @ expanded_states[3])
+    # print('12', expanded_states[1].conj() @ expanded_states[2])
+    # print('13', expanded_states[1].conj() @ expanded_states[3])
+    # print('23', expanded_states[2].conj() @ expanded_states[3])
     expanded_states = gram_schmidt(expanded_states)
-
+    # print('01', expanded_states[0].conj() @ expanded_states[1])
+    # print('02', expanded_states[0].conj() @ expanded_states[2])
+    # print('03', expanded_states[0].conj() @ expanded_states[3])
+    # print('12', expanded_states[1].conj() @ expanded_states[2])
+    # print('13', expanded_states[1].conj() @ expanded_states[3])
+    # print('23', expanded_states[2].conj() @ expanded_states[3])
     return eigvals[0], expanded_states
+
+if __name__ == '__main__':
+    from models.dha_for_3x3 import DHA
+
+    vqe = DHA(
+        n_epoch=100,
+        threshold1=1e-2,
+        threshold2=1e-2,
+        x_dimension=3,
+        y_dimension=3,
+        n_electrons=9,
+        n_spin_up=5,
+        n_spin_down=4,
+        tunneling=1,
+        coulomb=6,
+        # load_model=True
+    )
+
+    new_hamiltonian = get_sparse_operator(vqe.fermionHamiltonian)
+
+    gs_e, gs_wf = jw_get_ground_state_for_3x3(
+        sparse_operator=get_sparse_operator(vqe.fermionHamiltonian),
+        particle_number=vqe.n_electrons,
+        spin_up=vqe.n_spin_up,
+        spin_down=vqe.n_spin_down
+    )
+
+    print(gs_wf[0].conj() @ new_hamiltonian @ gs_wf[0])
+    print(gs_wf[1].conj() @ new_hamiltonian @ gs_wf[1])
+    print(gs_wf[2].conj() @ new_hamiltonian @ gs_wf[2])
+    print(gs_wf[3].conj() @ new_hamiltonian @ gs_wf[3])
+

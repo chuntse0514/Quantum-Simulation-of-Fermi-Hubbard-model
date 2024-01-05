@@ -235,8 +235,6 @@ class DHA:
                                                         spin_up=self.n_spin_up,
                                                         spin_down=self.n_spin_down
                                                     )
-            ground_state_wfs = [csc_matrix(ground_state_wf.reshape(-1, 1))
-                                for ground_state_wf in ground_state_wfs]
             state_dict = {
                 'energy': ground_state_energy,
                 'wave function': ground_state_wfs
@@ -253,10 +251,10 @@ class DHA:
         # Sz = get_sparse_operator(self.fermionOperators['Sz'], n_qubits=self.n_qubits)
         # S_square = get_sparse_operator(self.fermionOperators['S^2'], n_qubits=self.n_qubits)
 
-        # up_spin_value = (self.ground_state_wf.conj().transpose() @ up @ self.ground_state_wf).real[0, 0]
-        # down_spin_value = (self.ground_state_wf.conj().transpose() @ down @ self.ground_state_wf).real[0, 0]
-        # Sz_value = (self.ground_state_wf.conj().transpose() @ Sz @ self.ground_state_wf).real[0, 0]
-        # S_square_value = (self.ground_state_wf.conj().transpose() @ S_square @ self.ground_state_wf).real[0, 0]
+        # up_spin_value = (self.ground_state_wf.conj().transpose() @ up @ self.ground_state_wf)
+        # down_spin_value = (self.ground_state_wf.conj().transpose() @ down @ self.ground_state_wf)
+        # Sz_value = (self.ground_state_wf.conj().transpose() @ Sz @ self.ground_state_wf)
+        # S_square_value = (self.ground_state_wf.conj().transpose() @ S_square @ self.ground_state_wf)
         
         print('ground state energy: ', self.ground_state_energy)
         print('particle number: ', self.n_electrons)
@@ -362,12 +360,12 @@ class DHA:
 
     def calculate_fidelity(self, ground_state_wfs, state):
 
-        projected_state = torch.zeros_like(state, dtype=torch.complex128).to(self.device)
+        projected_state = np.zeros_like(state)
         for ground_state_wf in ground_state_wfs:
-            coeff = torch.inner(ground_state_wf.conj(), state)
+            coeff = ground_state_wf.conj() @ state
             projected_state += coeff * ground_state_wf
-        projected_state = projected_state / torch.linalg.vector_norm(projected_state)
-        return torch.inner(projected_state.conj(), state).abs() ** 2
+        projected_state = projected_state / np.linalg.norm(projected_state, ord=2)
+        return np.abs(state.conj() @ projected_state) ** 2
 
     def run(self):
         
@@ -383,9 +381,7 @@ class DHA:
         else:
             dev = qml.device('lightning.gpu', wires=self.n_qubits)
             diff_method = 'adjoint'
-        ground_state_wfs = [torch.complex(torch.Tensor(ground_state_wf.real.todense()).view(-1).double(), 
-                                          torch.Tensor(ground_state_wf.imag.todense()).view(-1).double()).to(self.device)
-                            for ground_state_wf in self.ground_state_wfs]
+
         i_epoch = len(self.results['epoch loss'])
 
         while i_epoch < self.n_epoch:
@@ -412,9 +408,8 @@ class DHA:
             while True:
                 
                 model = qml.QNode(self.circuit, dev, interface='torch', diff_method=None)
-                state = model(mode='state')
-                state = torch.complex(torch.Tensor(state.real).double(), torch.Tensor(state.imag).double()).to(self.device)
-                fidelity = self.calculate_fidelity(ground_state_wfs, state)
+                state = model(mode='state').detach().cpu().numpy()
+                fidelity = self.calculate_fidelity(self.ground_state_wfs, state)
                 
                 # Delete the unused state, release the memory of GPU device
                 del state, model
@@ -483,8 +478,8 @@ if __name__ == '__main__':
         n_spin_up=5,
         n_spin_down=4,
         tunneling=1,
-        coulomb=4,
-        # load_model=True
+        coulomb=6,
+        load_model=True
     )
     # vqe.get_ground_state_properties()
     vqe.run()

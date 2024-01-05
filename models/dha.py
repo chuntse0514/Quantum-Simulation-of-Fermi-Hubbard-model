@@ -28,6 +28,7 @@ from functools import reduce, partial
 import gc
 import os
 import pickle
+import time
 
 def get_particle_number_operator(x_dimension, y_dimension, spinless=False):
 
@@ -186,6 +187,7 @@ class DHA:
         self.decomposition, self.diagonal = givens_decomposition_square(self.FT_transformation_matrix)
         self.circuit_description = list(reversed(self.decomposition))
         self.k_quadratic_term = fourier_transform(self.quadratic_term, x_dimension, y_dimension)
+        self.k_interacting_term = fourier_transform(self.interacting_term, x_dimension, y_dimension)
         self.spin_up_indices, self.spin_down_indices = get_non_interacting_ground_state_index(
                                                             self.k_quadratic_term,
                                                             self.n_qubits,
@@ -235,7 +237,6 @@ class DHA:
                                                         spin_up=self.n_spin_up,
                                                         spin_down=self.n_spin_down
                                                     )
-            ground_state_wf = csc_matrix(ground_state_wf.reshape(-1, 1))
             state_dict = {
                 'energy': ground_state_energy,
                 'wave function': ground_state_wf
@@ -252,10 +253,10 @@ class DHA:
         # Sz = get_sparse_operator(self.fermionOperators['Sz'], n_qubits=self.n_qubits)
         # S_square = get_sparse_operator(self.fermionOperators['S^2'], n_qubits=self.n_qubits)
 
-        # up_spin_value = (self.ground_state_wf.conj().transpose() @ up @ self.ground_state_wf).real[0, 0]
-        # down_spin_value = (self.ground_state_wf.conj().transpose() @ down @ self.ground_state_wf).real[0, 0]
-        # Sz_value = (self.ground_state_wf.conj().transpose() @ Sz @ self.ground_state_wf).real[0, 0]
-        # S_square_value = (self.ground_state_wf.conj().transpose() @ S_square @ self.ground_state_wf).real[0, 0]
+        # up_spin_value = (self.ground_state_wf.conj() @ up @ self.ground_state_wf).real
+        # down_spin_value = (self.ground_state_wf.conj() @ down @ self.ground_state_wf).real
+        # Sz_value = (self.ground_state_wf.conj() @ Sz @ self.ground_state_wf).real
+        # S_square_value = (self.ground_state_wf.conj() @ S_square @ self.ground_state_wf).real
         
         print('ground state energy: ', self.ground_state_energy)
         print('particle number: ', self.n_electrons)
@@ -363,6 +364,7 @@ class DHA:
         
         self.get_ground_state_properties()
 
+        start_time = time.time()
         fig = plt.figure(figsize=(12, 6))
         ax1 = fig.add_subplot(1, 2, 1)
         ax2 = fig.add_subplot(1, 2, 2)
@@ -373,8 +375,6 @@ class DHA:
         else:
             dev = qml.device('lightning.gpu', wires=self.n_qubits)
             diff_method = 'adjoint'
-        ground_state_wf = torch.complex(torch.Tensor(self.ground_state_wf.real.todense()).view(-1).double(), 
-                                        torch.Tensor(self.ground_state_wf.imag.todense()).view(-1).double()).to(self.device)
 
         i_epoch = len(self.results['epoch loss'])
 
@@ -403,8 +403,9 @@ class DHA:
                 
                 model = qml.QNode(self.circuit, dev, interface='torch', diff_method=None)
                 state = model(mode='state')
-                state = torch.complex(torch.Tensor(state.real).double(), torch.Tensor(state.imag).double()).to(self.device)
-                fidelity = torch.inner(ground_state_wf.conj(), state).abs() ** 2
+                if self.n_qubits < 20:
+                    state = state.detach().cpu().numpy()
+                fidelity = np.abs(state.conj() @ self.ground_state_wf) ** 2
                 
                 # Delete the unused state, release the memory of GPU device
                 del state, model
@@ -461,6 +462,10 @@ class DHA:
 
             plt.savefig(self.img_filepath)
         
+        end_time = time.time()
+
+        print('total run time: ', end_time - start_time)
+        
 
 if __name__ == '__main__':
     vqe = DHA(
@@ -473,8 +478,8 @@ if __name__ == '__main__':
         n_spin_up=4,
         n_spin_down=4,
         tunneling=1,
-        coulomb=6,
-        load_model=True
+        coulomb=2,
+        load_model=False
     )
     # vqe.get_ground_state_properties()
     vqe.run()
