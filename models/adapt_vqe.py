@@ -121,7 +121,7 @@ def get_non_interacting_ground_state_index(quadratic_hamiltonian: FermionOperato
 
     return spin_up_indices, spin_down_indices
 
-class DHA:
+class ADAPT:
     def __init__(self,
                  n_epoch: int,
                  threshold1: float,
@@ -194,10 +194,10 @@ class DHA:
                                                             n_spin_up, n_spin_down
                                                        )
         print('spin up indices: ', self.spin_up_indices, '  ', 'spin down indices: ', self.spin_down_indices, '\n')
-        self.img_filepath = f'./images/DHA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).png'
+        self.img_filepath = f'./images/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).png'
         self.wf_filepath = f'./results/ground_state_results/Hubbard-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}).pkl'
-        self.result_filepath = f'./results/vqe_results/DHA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pkl'
-        self.model_filepath = f'./results/saved_model/DHA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pkl'
+        self.result_filepath = f'./results/vqe_results/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pkl'
+        self.model_filepath = f'./results/saved_model/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pkl'
         self.ground_state_energy, self.ground_state_wf = self.get_ground_state()
         
         if load_model:
@@ -444,7 +444,7 @@ class DHA:
 
             ax1.clear()
             length = len(self.results['iteration loss'])
-            ax1.plot(np.arange(length)+1, self.results['iteration loss'], color='coral', marker='X', ls='--', label='DHA')
+            ax1.plot(np.arange(length)+1, self.results['iteration loss'], color='coral', marker='X', ls='--', label='ADAPT')
             ax1.plot(np.arange(length)+1, np.full(length, self.ground_state_energy), color='violet', label='ED')
             ax1.set_xlabel('iteration')
             ax1.set_ylabel('energy')
@@ -453,7 +453,7 @@ class DHA:
             
             ax2.clear()
             length = len(self.results['epoch loss'])
-            ax2.plot(np.arange(length)+1, self.results['epoch loss'], color='yellowgreen', marker='X', ls='--', label='DHA')
+            ax2.plot(np.arange(length)+1, self.results['epoch loss'], color='yellowgreen', marker='X', ls='--', label='ADAPT')
             ax2.plot(np.arange(length)+1, np.full(length, self.ground_state_energy), color='violet', label='ED')
             ax2.set_xlabel('epoch')
             ax2.set_ylabel('energy')
@@ -468,7 +468,7 @@ class DHA:
         
 
 if __name__ == '__main__':
-    vqe = DHA(
+    vqe = ADAPT(
         n_epoch=100,
         threshold1=1e-2,
         threshold2=1e-2,

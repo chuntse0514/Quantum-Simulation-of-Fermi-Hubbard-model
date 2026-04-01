@@ -229,7 +229,7 @@ def jw_get_ground_state_for_3x3(sparse_operator, particle_number, spin_up, spin_
     return eigvals[0], expanded_states
 
 if __name__ == '__main__':
-    from models.dha_for_3x3 import DHA
+    from models.adapt_vqe_for_3x3 import DHA
 
     vqe = DHA(
         n_epoch=100,
