@@ -1,1 +1,1 @@
-# Dynamical-Hamiltonian-Ansatz
+# ADAPT-VQE study of Fermi-Hubbard model
