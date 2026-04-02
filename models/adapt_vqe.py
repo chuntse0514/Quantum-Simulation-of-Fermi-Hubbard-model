@@ -1,8 +1,12 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 import pennylane as qml
+import jax
+import jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+import optax
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
 from scipy.sparse import csc_matrix
 from openfermion import (
     QubitOperator,
@@ -25,10 +29,10 @@ from operators.fourier import fourier_transform_matrix, fourier_transform
 from operators.tools import get_interacting_term, get_quadratic_term
 from operators.pool import hubbard_interaction_pool_simplified
 from functools import reduce, partial
-import gc
 import os
-import pickle
+import json
 import time
+
 
 def get_particle_number_operator(x_dimension, y_dimension, spinless=False):
 
@@ -103,21 +107,25 @@ def print_list(op_list):
 
 def get_non_interacting_ground_state_index(quadratic_hamiltonian: FermionOperator, n_qubits, n_spin_up, n_spin_down):
 
-    spin_up_energies = {x: 0 for x in range(0, n_qubits, 2)}
-    spin_down_energies = {x: 0 for x in range(1, n_qubits, 2)}
+    spin_up_energies = {x: 0.0 for x in range(0, n_qubits, 2)}
+    spin_down_energies = {x: 0.0 for x in range(1, n_qubits, 2)}
     
     for term, coeff in quadratic_hamiltonian.terms.items():
         index = term[0][0]
         if index % 2 == 0:
-            spin_up_energies[index] = coeff
+            spin_up_energies[index] = float(coeff.real)
         else:
-            spin_down_energies[index] = coeff
+            spin_down_energies[index] = float(coeff.real)
 
     spin_up_indices = sorted(spin_up_energies, key=spin_up_energies.get)[:n_spin_up]
     spin_down_indices = sorted(spin_down_energies, key=spin_down_energies.get)[:n_spin_down]
 
-    print('spin up orbital energies:', spin_up_energies)
-    print('spin down orbital energies: ', spin_down_energies)
+    # Format for beautiful printing
+    spin_up_print = {k: round(v, 6) for k, v in spin_up_energies.items()}
+    spin_down_print = {k: round(v, 6) for k, v in spin_down_energies.items()}
+
+    print('spin up orbital energies:', spin_up_print)
+    print('spin down orbital energies: ', spin_down_print)
 
     return spin_up_indices, spin_down_indices
 
@@ -153,8 +161,8 @@ class ADAPT:
         self.n_spin_down = n_spin_down
         
         self.ratio = 0.1
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        # self.device = torch.device("cpu")
+        # In JAX, we usually don't need to specify device manually like in Torch
+        # unless we want to use specific ones.
 
         self.fermionHamiltonian = fermi_hubbard(x_dimension,
                                                 y_dimension,
@@ -194,20 +202,26 @@ class ADAPT:
                                                             n_spin_up, n_spin_down
                                                        )
         print('spin up indices: ', self.spin_up_indices, '  ', 'spin down indices: ', self.spin_down_indices, '\n')
-        self.img_filepath = f'./images/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).png'
-        self.wf_filepath = f'./results/ground_state_results/Hubbard-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}).pkl'
-        self.result_filepath = f'./results/vqe_results/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pkl'
-        self.model_filepath = f'./results/saved_model/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pkl'
-        self.ground_state_energy, self.ground_state_wf = self.get_ground_state()
+        self.img_filepath = f'./images/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pdf'
+        self.wf_filepath = f'./results/ground_state_results/Hubbard-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}).npz'
+        self.result_filepath = f'./results/vqe_results/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).json'
+        self.model_filepath = f'./results/saved_model/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).npz'
+        self.log_filepath = f'./results/vqe_logs/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).log'
+        self.ground_state_energy, self.ground_state_wfs = self.get_ground_state()
+        
+        if not load_model:
+            if os.path.exists(self.log_filepath):
+                os.remove(self.log_filepath)
         
         if load_model:
             self.load_model()
         else:
-            self.params = nn.ParameterDict({
-                'e': nn.Parameter(torch.zeros(len(self.gateOperatorPool)), requires_grad=True),
-                't': nn.Parameter(torch.Tensor([]), requires_grad=True)
-            }).to(self.device)
+            self.params = {
+                'e': jnp.zeros(len(self.gateOperatorPool)),
+                't': jnp.array([])
+            }
             self.selected_gates = []
+            self.selected_indices = []
             self.results = {
                 'epoch loss': [],
                 'iteration loss': [],
@@ -223,61 +237,55 @@ class ADAPT:
         # Check if the file exists. 
         # If the file exists, load the ground state energy and wavefunction
         if os.path.exists(self.wf_filepath):
-            with open(self.wf_filepath, 'rb') as file:
-                loaded_state_dict = pickle.load(file)
-                ground_state_energy = loaded_state_dict['energy']
-                ground_state_wf = loaded_state_dict['wave function']
+            loaded_data = np.load(self.wf_filepath)
+            ground_state_energy = float(loaded_data['energy'])
+            ground_state_wfs = list(loaded_data['wave_function'])
         
         # If the file does not exist, calculate the ground state energy and wavefunction, 
         # and then save them as a file
         else:
-            ground_state_energy, ground_state_wf = jw_get_ground_state(
+            ground_state_energy, ground_state_wfs = jw_get_ground_state(
                                                         sparse_operator=get_sparse_operator(self.fermionHamiltonian),
                                                         particle_number=self.n_electrons,
                                                         spin_up=self.n_spin_up,
                                                         spin_down=self.n_spin_down
                                                     )
-            state_dict = {
-                'energy': ground_state_energy,
-                'wave function': ground_state_wf
-            }
-            with open(self.wf_filepath, 'wb') as file:
-                pickle.dump(state_dict, file)
+            np.savez(self.wf_filepath, energy=ground_state_energy, wave_function=np.array(ground_state_wfs))
 
-        return ground_state_energy, ground_state_wf
+        return ground_state_energy, ground_state_wfs
 
     def get_ground_state_properties(self):
-        
-        # up = get_sparse_operator(self.fermionOperators['spin up'], n_qubits=self.n_qubits)
-        # down = get_sparse_operator(self.fermionOperators['spin down'], n_qubits=self.n_qubits)
-        # Sz = get_sparse_operator(self.fermionOperators['Sz'], n_qubits=self.n_qubits)
-        # S_square = get_sparse_operator(self.fermionOperators['S^2'], n_qubits=self.n_qubits)
-
-        # up_spin_value = (self.ground_state_wf.conj() @ up @ self.ground_state_wf).real
-        # down_spin_value = (self.ground_state_wf.conj() @ down @ self.ground_state_wf).real
-        # Sz_value = (self.ground_state_wf.conj() @ Sz @ self.ground_state_wf).real
-        # S_square_value = (self.ground_state_wf.conj() @ S_square @ self.ground_state_wf).real
-        
         print('ground state energy: ', self.ground_state_energy)
         print('particle number: ', self.n_electrons)
-        # print('spin up:', np.round(up_spin_value, decimals=6))
-        # print('spin down:', np.round(down_spin_value, decimals=6))
-        # print('Sz: ', np.round(Sz_value, decimals=6))
-        # print('S^2: ', np.round(S_square_value, decimals=6))
+        print('degeneracy: ', len(self.ground_state_wfs))
         print('')
+
+    def calculate_fidelity(self, state):
+        if len(self.ground_state_wfs) == 1:
+            return np.abs(state.conj() @ self.ground_state_wfs[0]) ** 2
+        
+        projected_state = np.zeros_like(state)
+        for ground_state_wf in self.ground_state_wfs:
+            coeff = ground_state_wf.conj() @ state
+            projected_state += coeff * ground_state_wf
+        
+        norm = np.linalg.norm(projected_state, ord=2)
+        if norm < 1e-10:
+            return 0.0
+        
+        projected_state = projected_state / norm
+        return np.abs(state.conj() @ projected_state) ** 2
 
     def save_model(self):
         
-        state_dict = {
-            'params': self.params,
-            'circuit': self.selected_gates
-        }
+        np.savez(self.model_filepath, **self.params, circuit_indices=np.array(self.selected_indices))
 
-        with open(self.model_filepath, 'wb') as file:
-            pickle.dump(state_dict, file)
+        # Convert FermionOperators to strings for JSON serialization
+        save_results = self.results.copy()
+        save_results['selected operators'] = [str(op) for op in self.results['selected operators']]
 
-        with open(self.result_filepath , 'wb') as file:
-            pickle.dump(self.results, file)
+        with open(self.result_filepath , 'w') as file:
+            json.dump(save_results, file)
 
     def load_model(self):
         
@@ -286,43 +294,35 @@ class ADAPT:
         if not os.path.exists(self.result_filepath):
             raise ValueError('Please check if the file ' + self.result_filepath + 'exists!')
         
-        with open(self.model_filepath, 'rb') as file:
-            state_dict = pickle.load(file)
-            self.params = state_dict['params'].to(self.device)
-            self.selected_gates = state_dict['circuit']
+        loaded_data = np.load(self.model_filepath)
+        self.params = {key: jnp.array(loaded_data[key]) for key in loaded_data.files if key != 'circuit_indices'}
+        self.selected_indices = loaded_data['circuit_indices'].tolist()
+        self.selected_gates = [self.gateOperatorPool[idx] for idx in self.selected_indices]
         
-        with open(self.result_filepath, 'rb') as file:
-            self.results = pickle.load(file)
+        with open(self.result_filepath, 'r') as file:
+            self.results = json.load(file)
     
     def select_operator(self):
         
-        if self.n_qubits < 20:
-            dev = qml.device('default.qubit.torch', wires=self.n_qubits)
-            diff_method = 'backprop'
-        else:
-            dev = qml.device('lightning.gpu', wires=self.n_qubits)
-            diff_method = 'adjoint'
-        model = qml.QNode(self.circuit, dev, interface='torch', diff_method=diff_method)
-        loss = model(mode='eval')
-        loss.backward()
-        grads = self.params['e'].grad.cpu().numpy()
-        grads = np.abs(grads)
-        self.params['e'].grad.zero_()
+        dev = qml.device('default.qubit', wires=self.n_qubits)
         
-        max_grad = np.max(grads)
-        self.Ng = np.sum((grads >= max_grad * self.ratio) * (grads >= self.threshold1))
-        selected_indices = np.argsort(grads)[::-1][:self.Ng].tolist()
+        @qml.qnode(dev, interface='jax', diff_method='backprop')
+        def model(params):
+            return self.circuit(params, mode='eval')
+
+        grads = jax.grad(model)(self.params)
+        grads_e = np.abs(grads['e'])
+        
+        max_grad = np.max(grads_e)
+        self.Ng = np.sum((grads_e >= max_grad * self.ratio) * (grads_e >= self.threshold1))
+        selected_indices = np.argsort(grads_e)[::-1][:self.Ng].tolist()
         selected_operator = [self.fermionOperatorPool[index] for index in selected_indices]
         selected_gates = [self.gateOperatorPool[index] for index in selected_indices]
-        max_grads = [grads[index] for index in selected_indices]
+        max_grads = [grads_e[index] for index in selected_indices]
 
-        del model
-        torch.cuda.empty_cache()
-        gc.collect()
+        return selected_operator, selected_gates, max_grads, selected_indices
 
-        return selected_operator, selected_gates, max_grads
-
-    def circuit(self, mode='train'):
+    def circuit(self, params, mode='train'):
         
         # prepare non-interacting ground state in k-space
         for q in self.spin_up_indices + self.spin_down_indices:
@@ -331,14 +331,14 @@ class ADAPT:
         # circuit selected by algorithm
         if mode == 'train' or mode == 'state':
             for i, gate in enumerate(self.selected_gates):
-                gate(self.params['t'][i])
+                gate(params['t'][i])
             
         elif mode == 'eval':
             for i, gate in enumerate(self.selected_gates):
-                gate(self.params['t'][i])
+                gate(params['t'][i])
 
             for i, gate in enumerate(self.gateOperatorPool):
-                gate(self.params['e'][i])
+                gate(params['e'][i])
 
         # apply the Fourier Transform back to the real space
         for i in range(self.n_qubits):
@@ -369,69 +369,83 @@ class ADAPT:
         ax1 = fig.add_subplot(1, 2, 1)
         ax2 = fig.add_subplot(1, 2, 2)
 
-        if self.n_qubits < 20:
-            dev = qml.device('default.qubit.torch', wires=self.n_qubits)
-            diff_method = 'backprop'
-        else:
-            dev = qml.device('lightning.gpu', wires=self.n_qubits)
-            diff_method = 'adjoint'
+        dev = qml.device('default.qubit', wires=self.n_qubits)
 
         i_epoch = len(self.results['epoch loss'])
 
         while i_epoch < self.n_epoch:
-
-            selected_operators, selected_gates, max_grads = self.select_operator()
+            
+            print(f"\n{'='*20} Epoch {i_epoch + 1} {'='*20}")
+            print(">>> Phase 1: Operator Selection")
+            selected_operators, selected_gates, max_grads, selected_indices = self.select_operator()
             if len(max_grads) == 0:
-                print('\nconvergence criterion has satisfied, break the loop!')
+                print('>>> Convergence criterion satisfied, ending optimization.')
                 break
             
             self.selected_gates += selected_gates
-            self.params['t'] = torch.cat((self.params['t'], nn.Parameter(torch.zeros(self.Ng), requires_grad=True).to(self.device)))
+            self.selected_indices += selected_indices
+            self.params['t'] = jnp.concatenate([self.params['t'], jnp.zeros(self.Ng)])
             self.results['selected operators'] += selected_operators
             self.results['n_params'].append(len(self.results['selected operators']))
-            lr = torch.linalg.vector_norm(torch.Tensor(max_grads)).item() / np.sqrt(self.Ng) * 0.05
-            opt = optim.Adam(params=self.params.values(), lr=lr)
-            print('learning rate = ', lr)
-
-            print('Find operators')
-            print_list(selected_operators)
-            print('with max gradients')
-            print(max_grads)
-            print('')
+            lr = float(np.linalg.norm(max_grads) / np.sqrt(self.Ng) * 0.05)
             
+            # Use optax optimizer
+            optimizer = optax.adam(lr)
+            opt_state = optimizer.init(self.params)
+
+            print(f">>> Found {len(selected_operators)} new operators. Total parameters: {len(self.params['t'])}")
+            print(f">>> Learning rate: {lr:.6f}")
+            print(">>> Phase 2: Parameter Optimization")
+            
+            # Define QNodes once per epoch since the circuit structure is now fixed for this epoch
+            @jax.jit
+            @qml.qnode(dev, interface='jax', diff_method='backprop')
+            def train_circuit(p):
+                return self.circuit(p, mode='train')
+            
+            @jax.jit
+            @qml.qnode(dev, interface='jax', diff_method='backprop')
+            def state_circuit(p):
+                return self.circuit(p, mode='state')
+            
+            def loss_fn(p):
+                res = train_circuit(p)
+                return res[0], (res[1], res[2])
+
+            def train_step(params, opt_state):
+                (loss, (Sz, S_square)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+                updates, opt_state = optimizer.update(grads, opt_state)
+                params = optax.apply_updates(params, updates)
+                return params, opt_state, loss, Sz, S_square, grads
+
             while True:
                 
-                model = qml.QNode(self.circuit, dev, interface='torch', diff_method=None)
-                state = model(mode='state')
-                if self.n_qubits < 20:
-                    state = state.detach().cpu().numpy()
-                fidelity = np.abs(state.conj() @ self.ground_state_wf) ** 2
+                state = state_circuit(self.params)
+                fidelity = self.calculate_fidelity(state)
                 
-                # Delete the unused state, release the memory of GPU device
-                del state, model
-                torch.cuda.empty_cache()
-                gc.collect()
+                self.params, opt_state, loss, Sz, S_square, grads = train_step(self.params, opt_state)
 
-                model = qml.QNode(self.circuit, dev, interface='torch', diff_method=diff_method)
-                opt.zero_grad()
-                loss, Sz, S_square = model(mode='train')
-                loss.backward()
-                opt.step()
+                self.results['iteration loss'].append(float(loss))
+                self.results['Sz'].append(float(Sz))
+                self.results['S^2'].append(float(S_square))
+                self.results['fidelity'].append(float(fidelity))
 
-                self.results['iteration loss'].append(loss.item())
-                self.results['Sz'].append(Sz.item())
-                self.results['S^2'].append(S_square.item())
-                self.results['fidelity'].append(fidelity.item())
+                # Calculate grad norm for 't' parameters
+                grad_norm = float(jnp.linalg.norm(grads['t']))
 
-                grad_norm = torch.linalg.vector_norm(self.params['t'].grad).item()
-
-                print(f"iter: {len(self.results['iteration loss'])} | loss: {loss.item(): 6f} | norm: {grad_norm: 6f} | fidelity: {fidelity.item(): 6f} | Sz: {Sz.item(): 6f} | S^2: {S_square.item(): 6f}")
-
-                del loss, Sz, S_square, model
-                torch.cuda.empty_cache()
-                gc.collect()
+                log_str = (f"Iter: {len(self.results['iteration loss']):4d} | "
+                           f"Energy: {float(loss):.8f} | "
+                           f"Grad Norm: {grad_norm:.6f} | "
+                           f"Fidelity: {float(fidelity):.6f} | "
+                           f"Sz: {float(Sz):.6f} | "
+                           f"S^2: {float(S_square):.6f}")
+                print(log_str)
+                
+                with open(self.log_filepath, 'a') as f:
+                    f.write(log_str + '\n')
 
                 if grad_norm < self.threshold2:
+                    print(f">>> Optimization for Epoch {i_epoch + 1} finished (Grad Norm < {self.threshold2})")
                     break
             
             self.results['epoch loss'].append(self.results['iteration loss'][-1])

@@ -1,8 +1,10 @@
 import pennylane as qml
-from pennylane import numpy as np
-import torch 
-import torch.nn as nn
-import torch.optim as optim
+import jax
+import jax.numpy as jnp
+import optax
+import numpy as np
+import json
+import os
 from openfermion import (
     MolecularData, jordan_wigner, QubitOperator
 )
@@ -12,13 +14,15 @@ from .utils import (
     PauliStringRotation
 )
 from functools import partial
+import time
 
 class IQCC:
     def __init__(self,
                  molecule: MolecularData,
                  n_epoch: int,
                  lr: float,
-                 threshold: float
+                 threshold: float,
+                 load_model: bool = False
                  ):
 
         self.molecule = molecule
@@ -29,41 +33,63 @@ class IQCC:
         self.ratio = 0.1
         self.n_qubits = molecule.n_qubits
         self.n_electrons = molecule.n_electrons
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         self.fermionHamiltonian = molecule.get_molecular_hamiltonian()
         self.currentHamiltonian = jordan_wigner(self.fermionHamiltonian)
         self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(self.currentHamiltonian)
 
-        self.params = nn.ParameterDict({
-            'theta': nn.Parameter(torch.Tensor([np.pi for _ in range(self.n_electrons)] + [0 for _ in range(self.n_qubits - self.n_electrons)]), requires_grad=True),
-            'phi': nn.Parameter(torch.zeros(self.n_qubits), requires_grad=True),
-            'tau': nn.Parameter(torch.zeros(self.Ng), requires_grad=True)
-        }).to(self.device)
+        self.model_filepath = f'./results/saved_model/IQCC-{molecule.name}.npz'
+        self.result_filepath = f'./results/vqe_results/IQCC-{molecule.name}.json'
+        self.img_filepath = f'./results/vqe_results/IQCC-{molecule.name}.pdf'
 
-        self.loss_history = {
-            'iteration': [],
-            'epoch': []
-        }
+        if load_model:
+            self.load_model()
+        else:
+            self.params = {
+                'theta': jnp.array([np.pi for _ in range(self.n_electrons)] + [0.0 for _ in range(self.n_qubits - self.n_electrons)]),
+                'phi': jnp.zeros(self.n_qubits),
+                'tau': jnp.zeros(self.Ng)
+            }
+
+            self.loss_history = {
+                'iteration': [],
+                'epoch': []
+            }
         self.selectedGates = []
+
+    def save_model(self):
+        # We need to save currentHamiltonian too as it changes
+        np.savez(self.model_filepath, **self.params, currentHamiltonian=str(self.currentHamiltonian))
+        with open(self.result_filepath, 'w') as f:
+            json.dump(self.loss_history, f)
+
+    def load_model(self):
+        if os.path.exists(self.model_filepath):
+            loaded_data = np.load(self.model_filepath)
+            self.params = {key: jnp.array(loaded_data[key]) for key in loaded_data.files if key != 'currentHamiltonian'}
+            # Note: reconstructing QubitOperator from string is possible but complex,
+            # for now we'll just store it as string in the file.
+        if os.path.exists(self.result_filepath):
+            with open(self.result_filepath, 'r') as f:
+                self.loss_history = json.load(f)
         
-    def get_circuit(self, tau=None, appendGates=None):
+    def get_circuit(self, params, tau=None, appendGates=None):
         
-        if not appendGates:
+        if appendGates is None:
             
             for i in range(self.n_qubits):
-                qml.RY(self.params['theta'][i], wires=i)
-                qml.RZ(self.params['phi'][i], wires=i)
+                qml.RY(params['theta'][i], wires=i)
+                qml.RZ(params['phi'][i], wires=i)
             
             for i, gate in enumerate(self.selectedGates):
-                gate(self.params['tau'][i])
+                gate(params['tau'][i])
 
             return qml.expval(self.qmlHamiltonian)
         
         else:
             for i in range(self.n_qubits):
-                qml.RY(self.params['theta'][i].detach(), wires=i)
-                qml.RZ(self.params['phi'][i].detach(), wires=i)
+                qml.RY(params['theta'][i], wires=i)
+                qml.RZ(params['phi'][i], wires=i)
             
             for i, gate in enumerate(appendGates):
                 gate(tau[i])
@@ -111,14 +137,15 @@ class IQCC:
                 Pk_string += pauli + str(index) + ' '
             DIS_strings.append(Pk_string[:-1])
 
-        dev = qml.device('default.qubit.torch', wires=self.n_qubits)
-        tau = nn.Parameter(torch.zeros(len(DIS_gates)), requires_grad=True)
-        circuit = self.get_circuit
-        model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
-        loss = model(tau, DIS_gates)
-        loss.backward()
-        grads = tau.grad.detach().cpu().numpy()
-        grads = np.abs(grads)
+        dev = qml.device('default.qubit', wires=self.n_qubits)
+        
+        @qml.qnode(dev, interface='jax')
+        def model(tau_val):
+            return self.get_circuit(self.params, tau=tau_val, appendGates=DIS_gates)
+        
+        tau_init = jnp.zeros(len(DIS_gates))
+        grads = jax.grad(model)(tau_init)
+        grads = np.abs(np.array(grads))
 
         max_grad = np.max(grads)
         if max_grad * self.ratio > self.threshold:
@@ -139,7 +166,7 @@ class IQCC:
         ax1 = fig.add_subplot(1, 2, 1)
         ax2 = fig.add_subplot(1, 2, 2)
 
-        dev = qml.device('default.qubit.torch', wires=self.n_qubits)
+        dev = qml.device('default.qubit', wires=self.n_qubits)
 
         for i_epoch in range(self.n_epoch):
 
@@ -151,35 +178,43 @@ class IQCC:
                 break
 
             self.selectedGates = maxGates
-            self.params['tau'] = nn.Parameter(torch.zeros(self.Ng), requires_grad=True).to(self.device)
+            self.params['tau'] = jnp.zeros(self.Ng)
 
-            circuit = self.get_circuit
-            model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
-            opt = optim.Adam(self.params.values(), lr=self.lr)
+            optimizer = optax.adam(self.lr)
+            opt_state = optimizer.init(self.params)
+
+            # Re-define QNode once per epoch because qmlHamiltonian has been updated
+            @qml.qnode(dev, interface='jax')
+            def loss_fn(p):
+                return self.get_circuit(p)
+
+            def train_step(params, opt_state):
+                loss, grads = jax.value_and_grad(loss_fn)(params)
+                updates, opt_state = optimizer.update(grads, opt_state)
+                params = optax.apply_updates(params, updates)
+                return params, opt_state, loss, grads
 
             while True:
-                opt.zero_grad()
-                loss = model()
-                loss.backward()
-                opt.step()
-                self.loss_history['iteration'].append(loss.item())
-                grad_vec = torch.cat((self.params['theta'].grad, self.params['phi'].grad, self.params['tau'].grad))
-                grad_norm = torch.linalg.vector_norm(grad_vec)
+                self.params, opt_state, loss, grads = train_step(self.params, opt_state)
+                self.loss_history['iteration'].append(float(loss))
+                
+                grad_norm = float(jnp.linalg.norm(jnp.concatenate([jax.tree_util.tree_flatten(grads)[0][i].flatten() for i in range(len(jax.tree_util.tree_flatten(grads)[0]))])))
                 if grad_norm < self.threshold:
                     break
-                print(loss.item(), grad_norm)
+                print(float(loss), grad_norm)
             
-            self.loss_history['epoch'].append(loss.item())
+            self.loss_history['epoch'].append(float(loss))
+            tau_final = np.array(self.params['tau'])
             self.selectedGates = []
 
-            maxOperators = [QubitOperator(op) for op in maxOperators]
-            for P_k, tau_k in zip(maxOperators[::-1], self.params['tau'].detach().cpu().numpy()[::-1]):
+            maxOperators_ops = [QubitOperator(op) for op in maxOperators]
+            for P_k, tau_k in zip(maxOperators_ops[::-1], tau_final[::-1]):
                 first_term = np.sin(tau_k) * (-1j / 2) * (self.currentHamiltonian * P_k - P_k * self.currentHamiltonian)
                 second_term = 1 / 2 * (1 - np.cos(tau_k)) * (P_k * self.currentHamiltonian * P_k - self.currentHamiltonian)
                 self.currentHamiltonian += first_term + second_term
             self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(self.currentHamiltonian)
             
-            print(f'epoch: {i_epoch+1}, total energy: {loss.item()}')
+            print(f'epoch: {i_epoch+1}, total energy: {float(loss)}')
 
             length = len(self.loss_history['iteration'])
             ax1.clear()
@@ -200,8 +235,9 @@ class IQCC:
             ax2.legend()
             ax2.grid()
 
-            plt.savefig('output.png')
+            plt.savefig(self.img_filepath)
             plt.pause(0.01)
+            self.save_model()
 
 
 if __name__ == '__main__':

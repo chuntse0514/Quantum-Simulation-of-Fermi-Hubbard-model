@@ -1,8 +1,8 @@
 import pennylane as qml
-from pennylane import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
+import jax
+import jax.numpy as jnp
+import optax
+import numpy as np
 from openfermion import (
     FermionOperator,
     QubitOperator,
@@ -24,7 +24,9 @@ from operators.fourier import fourier_transform_matrix, fourier_transform
 from operators.tools import get_quadratic_term, get_interacting_term
 from functools import reduce
 import os
-import pickle
+import json
+import numpy as np
+import time
 
 def get_particle_number_operator(x_dimension, y_dimension, spinless=False):
 
@@ -96,21 +98,25 @@ def Trotterize_generator(theta, generator: QubitOperator):
 
 def get_non_interacting_ground_state_index(quadratic_hamiltonian: FermionOperator, n_qubits, n_spin_up, n_spin_down):
 
-    spin_up_energies = {x: 0 for x in range(0, n_qubits, 2)}
-    spin_down_energies = {x: 0 for x in range(1, n_qubits, 2)}
+    spin_up_energies = {x: 0.0 for x in range(0, n_qubits, 2)}
+    spin_down_energies = {x: 0.0 for x in range(1, n_qubits, 2)}
     
     for term, coeff in quadratic_hamiltonian.terms.items():
         index = term[0][0]
         if index % 2 == 0:
-            spin_up_energies[index] = coeff
+            spin_up_energies[index] = float(coeff.real)
         else:
-            spin_down_energies[index] = coeff
+            spin_down_energies[index] = float(coeff.real)
 
     spin_up_indices = sorted(spin_up_energies, key=spin_up_energies.get)[:n_spin_up]
     spin_down_indices = sorted(spin_down_energies, key=spin_down_energies.get)[:n_spin_down]
 
-    print('spin up orbital energies:', spin_up_energies)
-    print('spin down orbital energies: ', spin_down_energies)
+    # Format for beautiful printing
+    spin_up_print = {k: round(v, 6) for k, v in spin_up_energies.items()}
+    spin_down_print = {k: round(v, 6) for k, v in spin_down_energies.items()}
+
+    print('spin up orbital energies:', spin_up_print)
+    print('spin down orbital energies: ', spin_down_print)
 
     return spin_up_indices, spin_down_indices
 
@@ -142,7 +148,6 @@ class HVA:
         self.n_electrons = n_electrons
         self.n_spin_up = n_spin_up
         self.n_spin_down = n_spin_down
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         self.fermionHamiltonian = fermi_hubbard(x_dimension,
                                                 y_dimension,
@@ -194,20 +199,25 @@ class HVA:
         print('spin up indices: ', self.spin_up_indices, '  ', 'spin down indices: ', self.spin_down_indices, '\n')
         
 
-        self.img_filepath = f'./images/HVA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}, reps={reps}).png'
-        self.wf_filepath = f'./results/ground_state_results/Hubbard-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}).pkl'
-        self.result_filepath = f'./results/vqe_results/HVA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}, reps={reps}).pkl'
-        self.model_filepath = f'./results/saved_model/HVA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}, reps={reps}).pkl'
-        self.ground_state_energy, self.ground_state_wf = self.get_ground_state()
+        self.img_filepath = f'./images/HVA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}, reps={reps}).pdf'
+        self.wf_filepath = f'./results/ground_state_results/Hubbard-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}).npz'
+        self.result_filepath = f'./results/vqe_results/HVA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}, reps={reps}).json'
+        self.model_filepath = f'./results/saved_model/HVA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}, reps={reps}).npz'
+        self.log_filepath = f'./results/vqe_logs/HVA-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}, reps={reps}).log'
+        self.ground_state_energy, self.ground_state_wfs = self.get_ground_state()
         
+        if not load_model:
+            if os.path.exists(self.log_filepath):
+                os.remove(self.log_filepath)
+
         if load_model:
             self.load_model()
         else:
-            self.params = nn.ParameterDict({
-                'theta_U': nn.Parameter(torch.zeros(reps+1), requires_grad=True),
-                'theta_v': nn.Parameter(torch.zeros(reps * self.Nv), requires_grad=True),
-                'theta_h': nn.Parameter(torch.zeros(reps * self.Nh), requires_grad=True),
-            }).to(self.device)
+            self.params = {
+                'theta_U': jnp.zeros(reps+1),
+                'theta_v': jnp.zeros(reps * self.Nv),
+                'theta_h': jnp.zeros(reps * self.Nh),
+            }
 
             self.results = {
                 'loss': [],
@@ -221,40 +231,29 @@ class HVA:
         # Check if the file exists. 
         # If the file exists, load the ground state energy and wavefunction
         if os.path.exists(self.wf_filepath):
-            with open(self.wf_filepath, 'rb') as file:
-                loaded_state_dict = pickle.load(file)
-                ground_state_energy = loaded_state_dict['energy']
-                ground_state_wf = loaded_state_dict['wave function']
+            loaded_data = np.load(self.wf_filepath)
+            ground_state_energy = float(loaded_data['energy'])
+            ground_state_wfs = list(loaded_data['wave_function'])
         
         # If the file does not exist, calculate the ground state energy and wavefunction, 
         # and then save them as a file
         else:
-            ground_state_energy, ground_state_wf = jw_get_ground_state(
+            ground_state_energy, ground_state_wfs = jw_get_ground_state(
                                                         sparse_operator=get_sparse_operator(self.fermionHamiltonian),
                                                         particle_number=self.n_electrons,
                                                         spin_up=self.n_spin_up,
                                                         spin_down=self.n_spin_down
                                                     )
-            state_dict = {
-                'energy': ground_state_energy,
-                'wave function': ground_state_wf
-            }
-            with open(self.wf_filepath, 'wb') as file:
-                pickle.dump(state_dict, file)
+            np.savez(self.wf_filepath, energy=ground_state_energy, wave_function=np.array(ground_state_wfs))
 
-        return ground_state_energy, ground_state_wf
+        return ground_state_energy, ground_state_wfs
     
     def save_model(self):
         
-        state_dict = {
-            'params': self.params,
-        }
+        np.savez(self.model_filepath, **self.params)
 
-        with open(self.model_filepath, 'wb') as file:
-            pickle.dump(state_dict, file)
-
-        with open(self.result_filepath , 'wb') as file:
-            pickle.dump(self.results, file)
+        with open(self.result_filepath , 'w') as file:
+            json.dump(self.results, file)
 
     def load_model(self):
         
@@ -263,15 +262,34 @@ class HVA:
         if not os.path.exists(self.result_filepath):
             raise ValueError('Please check if the file ' + self.result_filepath + 'exists!')
         
-        with open(self.model_filepath, 'rb') as file:
-            state_dict = pickle.load(file)
-            self.params = state_dict['params'].to(self.device)
+        loaded_params = np.load(self.model_filepath)
+        self.params = {key: jnp.array(loaded_params[key]) for key in loaded_params.files}
         
-        with open(self.result_filepath, 'rb') as file:
-            self.results = pickle.load(file)        
+        with open(self.result_filepath, 'r') as file:
+            self.results = json.load(file)
     
-    def circuit(self, theta_U, theta_h, theta_v, mode='train'):
+    def calculate_fidelity(self, state):
+        if len(self.ground_state_wfs) == 1:
+            return np.abs(state.conj() @ self.ground_state_wfs[0]) ** 2
         
+        projected_state = np.zeros_like(state)
+        for ground_state_wf in self.ground_state_wfs:
+            coeff = ground_state_wf.conj() @ state
+            projected_state += coeff * ground_state_wf
+        
+        norm = np.linalg.norm(projected_state, ord=2)
+        if norm < 1e-10:
+            return 0.0
+        
+        projected_state = projected_state / norm
+        return np.abs(state.conj() @ projected_state) ** 2
+
+    def circuit(self, params, mode='train'):
+        
+        theta_U = params['theta_U']
+        theta_h = params['theta_h']
+        theta_v = params['theta_v']
+
         # prepare non-interacting ground state
         for q in self.spin_up_indices + self.spin_down_indices:
             qml.PauliX(wires=q)
@@ -308,32 +326,58 @@ class HVA:
         ax1 = fig.add_subplot(1, 2, 1)
         ax2 = fig.add_subplot(1, 2, 2)
 
-        dev = qml.device('default.qubit.torch', wires=self.n_qubits)
-        opt = optim.Adam(params=self.params.values(), lr=self.lr)
-        circuit = self.circuit
-        model = qml.QNode(circuit, dev, interface='torch', diff_method='backprop')
+        dev = qml.device('default.qubit', wires=self.n_qubits)
+        optimizer = optax.adam(self.lr)
+        opt_state = optimizer.init(self.params)
         
+        # Define QNodes once since the HVA circuit structure is fixed from the start
+        @qml.qnode(dev, interface='jax')
+        def train_circuit(p):
+            return self.circuit(p, mode='train')
+        
+        @qml.qnode(dev, interface='jax')
+        def state_circuit(p):
+            return self.circuit(p, mode='state')
+        
+        def loss_fn(p):
+            res = train_circuit(p)
+            return res[0], (res[1], res[2])
+
+        def train_step(params, opt_state):
+            (loss, (Sz, S_square)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+            updates, opt_state = optimizer.update(grads, opt_state)
+            params = optax.apply_updates(params, updates)
+            return params, opt_state, loss, Sz, S_square, grads
+
         i_epoch = len(self.results['loss'])
+
+        print(f"\n{'='*20} HVA Optimization Starting {'='*20}")
+        print(f">>> Repetitions: {self.reps} | Learning rate: {self.lr}")
 
         while i_epoch < self.n_epoch:
 
-            state = model(self.params['theta_U'], self.params['theta_h'], self.params['theta_v'], mode='state')
-            state = state.detach().cpu().numpy()
-            fidelity = np.abs(state.conj() @ self.ground_state_wf) ** 2
+            state = state_circuit(self.params)
+            fidelity = self.calculate_fidelity(state)
             
-            opt.zero_grad()
-            loss, Sz, S_square = model(self.params['theta_U'], self.params['theta_h'], self.params['theta_v'], mode='train')
-            loss.backward()
-            opt.step()
+            self.params, opt_state, loss, Sz, S_square, grads = train_step(self.params, opt_state)
 
-            self.results['loss'].append(loss.item())
-            self.results['Sz'].append(Sz.item())
-            self.results['S^2'].append(S_square.item())
-            self.results['fidelity'].append(fidelity.item())
+            self.results['loss'].append(float(loss))
+            self.results['Sz'].append(float(Sz))
+            self.results['S^2'].append(float(S_square))
+            self.results['fidelity'].append(float(fidelity))
 
-            grad_vector = torch.cat((self.params['theta_U'].grad, self.params['theta_h'].grad, self.params['theta_v'].grad))
-            grad_norm = torch.linalg.vector_norm(grad_vector).item()
-            print(f"iter: {len(self.results['loss'])} | loss: {loss.item(): 6f} | norm: {grad_norm: 6f} | fidelity: {fidelity.item(): 6f} | Sz: {Sz.item(): 6f} | S^2: {S_square.item(): 6f}")
+            grad_norm = float(jnp.linalg.norm(jnp.concatenate([jax.tree_util.tree_flatten(grads)[0][i].flatten() for i in range(len(jax.tree_util.tree_flatten(grads)[0]))])))
+            
+            log_str = (f"Epoch: {i_epoch+1:4d} | "
+                       f"Energy: {float(loss):.8f} | "
+                       f"Grad Norm: {grad_norm:.6f} | "
+                       f"Fidelity: {float(fidelity):.6f} | "
+                       f"Sz: {float(Sz):.6f} | "
+                       f"S^2: {float(S_square):.6f}")
+            print(log_str)
+            
+            with open(self.log_filepath, 'a') as f:
+                f.write(log_str + '\n')
             
             ax1.clear()
             ax1.plot(np.arange(i_epoch+1)+1, self.results['loss'], marker='X', color='r', label='HVA')
