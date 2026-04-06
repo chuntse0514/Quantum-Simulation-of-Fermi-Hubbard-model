@@ -136,7 +136,8 @@ class HVA:
                  periodic=True,
                  spinless=False,
                  particle_hole_symmetry=False,
-                 load_model=False
+                 load_model=False,
+                 device='default.qubit'
                  ):
         
         self.n_epoch = n_epoch
@@ -148,6 +149,7 @@ class HVA:
         self.n_electrons = n_electrons
         self.n_spin_up = n_spin_up
         self.n_spin_down = n_spin_down
+        self.device_name = device
 
         self.fermionHamiltonian = fermi_hubbard(x_dimension,
                                                 y_dimension,
@@ -326,16 +328,17 @@ class HVA:
         ax1 = fig.add_subplot(1, 2, 1)
         ax2 = fig.add_subplot(1, 2, 2)
 
-        dev = qml.device('default.qubit', wires=self.n_qubits)
+        dev = qml.device(self.device_name, wires=self.n_qubits)
+        diff_method = 'adjoint' if self.device_name == 'lightning.gpu' else 'backprop'
         optimizer = optax.adam(self.lr)
         opt_state = optimizer.init(self.params)
         
         # Define QNodes once since the HVA circuit structure is fixed from the start
-        @qml.qnode(dev, interface='jax')
+        @qml.qnode(dev, interface='jax', diff_method=diff_method)
         def train_circuit(p):
             return self.circuit(p, mode='train')
         
-        @qml.qnode(dev, interface='jax')
+        @qml.qnode(dev, interface='jax', diff_method=None)
         def state_circuit(p):
             return self.circuit(p, mode='state')
         
@@ -418,7 +421,8 @@ if __name__ == '__main__':
         periodic=True,
         spinless=False,
         particle_hole_symmetry=False,
-        load_model=False
+        load_model=False,
+        # device='lightning.gpu' # Uncomment to use cuQuantum and Adjoint Differentiation
     )
     
     vqe.run()

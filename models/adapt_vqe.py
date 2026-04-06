@@ -1,92 +1,56 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
-import pennylane as qml
+import time
+import json
+from functools import reduce, partial
+
+import numpy as np
 import jax
 import jax.numpy as jnp
-jax.config.update("jax_enable_x64", True)
+import pennylane as qml
 import optax
-import numpy as np
-from scipy.sparse import csc_matrix
-from openfermion import (
-    QubitOperator,
-    FermionOperator,
-    fermi_hubbard,
-    jordan_wigner,
-    get_sparse_operator,
-    givens_decomposition_square,
-    jw_get_ground_state_at_particle_number,
-    number_operator,
-    up_index, down_index
-)
 import matplotlib.pyplot as plt
-from .utils import (
-    QubitOperator_to_qmlHamiltonian,
-    PauliStringRotation
+from openfermion import (
+    QubitOperator, FermionOperator, fermi_hubbard, jordan_wigner,
+    get_sparse_operator, givens_decomposition_square,
+    number_operator, up_index, down_index
 )
+
+from .utils import QubitOperator_to_qmlHamiltonian, PauliStringRotation
 from linalg.exact_diagonalization import jw_get_ground_state
 from operators.fourier import fourier_transform_matrix, fourier_transform
 from operators.tools import get_interacting_term, get_quadratic_term
 from operators.pool import hubbard_interaction_pool_simplified
-from functools import reduce, partial
-import os
-import json
-import time
 
+# Global JAX/XLA configuration
+jax.config.update("jax_enable_x64", True)
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
 
-def get_particle_number_operator(x_dimension, y_dimension, spinless=False):
-
-    n_sites = x_dimension * y_dimension
-    n_spin_orbitals = 2 * n_sites
-    total_particle_operator = FermionOperator()
-
-    for site in range(n_sites):
-
+def get_number_operator(n_sites, spin_type='total', spinless=False):
+    n_orbitals = n_sites if spinless else 2 * n_sites
+    op = FermionOperator()
+    for i in range(n_sites):
         if spinless:
-            total_particle_operator += number_operator(n_sites, site, 1)
+            op += number_operator(n_sites, i, 1.0)
         else:
-            total_particle_operator += number_operator(n_spin_orbitals, up_index(site), 1)
-            total_particle_operator += number_operator(n_spin_orbitals, down_index(site), 1)
-
-    return total_particle_operator
-
-def get_total_spin(n_sites, spin_type):
-    
-    total_spin = FermionOperator()
-    n_spin_orbitals = n_sites * 2
-
-    for site in range(n_sites):
-        if spin_type == 'spin-up':
-            total_spin += number_operator(n_spin_orbitals, up_index(site), 1)
-        elif spin_type == 'spin-down':
-            total_spin += number_operator(n_spin_orbitals, down_index(site), 1)
-        else:
-            raise ValueError('spin_type must be either spin-up or spin-down')
-
-    return total_spin
+            if spin_type in ['total', 'up']:
+                op += number_operator(n_orbitals, up_index(i), 1.0)
+            if spin_type in ['total', 'down']:
+                op += number_operator(n_orbitals, down_index(i), 1.0)
+    return op
 
 def get_spin_operators(n_sites, spin_type):
-
-    Sx = FermionOperator()
-    Sy = FermionOperator()
-    Sz = FermionOperator()
-
-    for site in range(n_sites):
-        i_up = up_index(site)
-        i_down = down_index(site)
-
-        Sx += FermionOperator(f'{i_up}^ {i_down}', 0.5) + FermionOperator(f'{i_down}^ {i_up}', 0.5)
-        Sy += FermionOperator(f'{i_up}^ {i_down}', -0.5j) - FermionOperator(f'{i_down}^ {i_up}', -0.5j)
-        Sz += FermionOperator(f'{i_up}^ {i_up}', 0.5) - FermionOperator(f'{i_down}^ {i_down}', 0.5)
-
-    if spin_type == 'Sx':
-        return Sx
-    elif spin_type == 'Sy':
-        return Sy
-    elif spin_type == 'Sz':
-        return Sz
-    elif spin_type == 'S^2':
-        return Sx * Sx + Sy * Sy + Sz * Sz
+    Sx, Sy, Sz = FermionOperator(), FermionOperator(), FermionOperator()
+    n_orbitals = n_sites * 2
+    for i in range(n_sites):
+        u, d = up_index(i), down_index(i)
+        Sx += FermionOperator(f'{u}^ {d}', 0.5) + FermionOperator(f'{d}^ {u}', 0.5)
+        Sy += FermionOperator(f'{u}^ {d}', -0.5j) - FermionOperator(f'{d}^ {u}', -0.5j)
+        Sz += FermionOperator(f'{u}^ {u}', 0.5) - FermionOperator(f'{d}^ {d}', 0.5)
+    
+    if spin_type == 'Sx': return Sx
+    if spin_type == 'Sy': return Sy
+    if spin_type == 'Sz': return Sz
+    if spin_type == 'S^2': return Sx*Sx + Sy*Sy + Sz*Sz
 
 def Trotterize_generator(theta, generator: QubitOperator):
 
@@ -130,107 +94,66 @@ def get_non_interacting_ground_state_index(quadratic_hamiltonian: FermionOperato
     return spin_up_indices, spin_down_indices
 
 class ADAPT:
-    def __init__(self,
-                 n_epoch: int,
-                 threshold1: float,
-                 threshold2: float,
-                 x_dimension: int,
-                 y_dimension: int,
-                 n_electrons: int,
-                 n_spin_up: int,
-                 n_spin_down: int,
-                 tunneling: float,
-                 coulomb: float,
-                 periodic=True,
-                 spinless=False,
-                 particle_hole_symmetry=False,
-                 load_model=False
-                 ):
+    def __init__(self, n_epoch, threshold1, threshold2, x_dimension, y_dimension, 
+                 n_electrons, n_spin_up, n_spin_down, tunneling, coulomb,
+                 periodic=True, spinless=False, particle_hole_symmetry=False,
+                 load_model=False, device='default.qubit', use_qng=False, qng_reg=1e-4):
         
-        self.fermionOperatorPool = hubbard_interaction_pool_simplified(x_dimension, y_dimension)
-        self.qubitOperatorPool = [jordan_wigner(generator) for generator in self.fermionOperatorPool]
-        self.gateOperatorPool = [partial(Trotterize_generator, generator=generator) for generator in self.qubitOperatorPool]
-
-        self.n_epoch = n_epoch
-        self.threshold1 = threshold1
-        self.threshold2 = threshold2
-        self.n_sites = x_dimension * y_dimension
-        self.n_qubits = x_dimension * y_dimension * 2
-        self.n_electrons = n_electrons
-        self.n_spin_up = n_spin_up
-        self.n_spin_down = n_spin_down
-        
+        self.n_epoch, self.threshold1, self.threshold2 = n_epoch, threshold1, threshold2
+        self.x_dim, self.y_dimension = x_dimension, y_dimension
+        self.n_sites, self.n_qubits = x_dimension * y_dimension, x_dimension * y_dimension * 2
+        self.n_electrons, self.n_spin_up, self.n_spin_down = n_electrons, n_spin_up, n_spin_down
+        self.device_name, self.use_qng, self.qng_reg = device, use_qng, qng_reg
         self.ratio = 0.1
-        # In JAX, we usually don't need to specify device manually like in Torch
-        # unless we want to use specific ones.
 
-        self.fermionHamiltonian = fermi_hubbard(x_dimension,
-                                                y_dimension,
-                                                tunneling,
-                                                coulomb,
-                                                periodic=periodic,
-                                                spinless=spinless,
+        # Operator pools
+        self.fermionOperatorPool = hubbard_interaction_pool_simplified(x_dimension, y_dimension)
+        self.qubitOperatorPool = [jordan_wigner(gen) for gen in self.fermionOperatorPool]
+        self.gateOperatorPool = [partial(Trotterize_generator, generator=gen) for gen in self.qubitOperatorPool]
+
+        # Hamiltonian and Observables
+        self.fermionHamiltonian = fermi_hubbard(x_dimension, y_dimension, tunneling, coulomb,
+                                                periodic=periodic, spinless=spinless,
                                                 particle_hole_symmetry=particle_hole_symmetry)
-        self.qubitHamiltonian = jordan_wigner(self.fermionHamiltonian)
-        self.quadratic_term = get_quadratic_term(self.fermionHamiltonian)
-        self.interacting_term = get_interacting_term(self.fermionHamiltonian)
         self.qmlHamiltonian = QubitOperator_to_qmlHamiltonian(self.fermionHamiltonian)
+        
         self.fermionOperators = {
-            'spin up': get_total_spin(self.n_sites, spin_type='spin-up'),
-            'spin down': get_total_spin(self.n_sites, spin_type='spin-down'),
-            'Sx': get_spin_operators(self.n_sites, spin_type='Sx'),
-            'Sy': get_spin_operators(self.n_sites, spin_type='Sy'),
-            'Sz': get_spin_operators(self.n_sites, spin_type='Sz'),
-            'S^2': get_spin_operators(self.n_sites, spin_type='S^2')
+            'Sz': get_spin_operators(self.n_sites, 'Sz'),
+            'S^2': get_spin_operators(self.n_sites, 'S^2')
         }
-        self.qmlOperators = {
-            'spin up': QubitOperator_to_qmlHamiltonian(self.fermionOperators['spin up']),
-            'spin down': QubitOperator_to_qmlHamiltonian(self.fermionOperators['spin down']),
-            'Sx': QubitOperator_to_qmlHamiltonian(self.fermionOperators['Sx']),
-            'Sy': QubitOperator_to_qmlHamiltonian(self.fermionOperators['Sy']),
-            'Sz': QubitOperator_to_qmlHamiltonian(self.fermionOperators['Sz']),
-            'S^2': QubitOperator_to_qmlHamiltonian(self.fermionOperators['S^2'])
-        }
-        self.FT_transformation_matrix = fourier_transform_matrix(x_dimension, y_dimension)
-        self.decomposition, self.diagonal = givens_decomposition_square(self.FT_transformation_matrix)
+        self.qmlOperators = {k: QubitOperator_to_qmlHamiltonian(v) for k, v in self.fermionOperators.items()}
+
+        # Fourier Transform setup
+        self.FT_matrix = fourier_transform_matrix(x_dimension, y_dimension)
+        self.decomposition, self.diagonal = givens_decomposition_square(self.FT_matrix)
         self.circuit_description = list(reversed(self.decomposition))
-        self.k_quadratic_term = fourier_transform(self.quadratic_term, x_dimension, y_dimension)
-        self.k_interacting_term = fourier_transform(self.interacting_term, x_dimension, y_dimension)
+        
+        k_quad = fourier_transform(get_quadratic_term(self.fermionHamiltonian), x_dimension, y_dimension)
         self.spin_up_indices, self.spin_down_indices = get_non_interacting_ground_state_index(
-                                                            self.k_quadratic_term,
-                                                            self.n_qubits,
-                                                            n_spin_up, n_spin_down
-                                                       )
-        print('spin up indices: ', self.spin_up_indices, '  ', 'spin down indices: ', self.spin_down_indices, '\n')
-        self.img_filepath = f'./images/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).pdf'
-        self.wf_filepath = f'./results/ground_state_results/Hubbard-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}).npz'
-        self.result_filepath = f'./results/vqe_results/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).json'
-        self.model_filepath = f'./results/saved_model/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).npz'
-        self.log_filepath = f'./results/vqe_logs/ADAPT-{x_dimension}x{y_dimension} (t={tunneling}, U={coulomb}, n_electrons={n_electrons}, up={n_spin_up}, down={n_spin_down}).log'
+            k_quad, self.n_qubits, n_spin_up, n_spin_down
+        )
+
+        # File path management
+        base_name = f"ADAPT-{x_dimension}x{y_dimension}_t{tunneling}_U{coulomb}_n{n_electrons}_up{n_spin_up}_down{n_spin_down}"
+        hubbard_name = f"Hubbard-{x_dimension}x{y_dimension}_t{tunneling}_U{coulomb}_n{n_electrons}"
+        
+        self.img_filepath = f'./images/{base_name}.pdf'
+        self.wf_filepath = f'./results/ground_state_results/{hubbard_name}.npz'
+        self.result_filepath = f'./results/vqe_results/{base_name}.json'
+        self.model_filepath = f'./results/saved_model/{base_name}.npz'
+        self.log_filepath = f'./results/vqe_logs/{base_name}.log'
+
         self.ground_state_energy, self.ground_state_wfs = self.get_ground_state()
         
-        if not load_model:
-            if os.path.exists(self.log_filepath):
-                os.remove(self.log_filepath)
+        if not load_model and os.path.exists(self.log_filepath):
+            os.remove(self.log_filepath)
         
         if load_model:
             self.load_model()
         else:
-            self.params = {
-                'e': jnp.zeros(len(self.gateOperatorPool)),
-                't': jnp.array([])
-            }
-            self.selected_gates = []
-            self.selected_indices = []
-            self.results = {
-                'epoch loss': [],
-                'iteration loss': [],
-                'Sz': [],
-                'S^2': [],
-                'fidelity': [],
-                'n_params': [],
-                'selected operators': []
-            }
+            self.params = {'e': jnp.zeros(len(self.gateOperatorPool)), 't': jnp.array([])}
+            self.selected_gates, self.selected_indices = [], []
+            self.results = {k: [] for k in ['epoch loss', 'iteration loss', 'Sz', 'S^2', 'fidelity', 'n_params', 'selected operators']}
 
     def get_ground_state(self):
         
@@ -303,16 +226,18 @@ class ADAPT:
             self.results = json.load(file)
     
     def select_operator(self):
-        
-        dev = qml.device('default.qubit', wires=self.n_qubits)
-        
-        @qml.qnode(dev, interface='jax', diff_method='backprop')
-        def model(params):
-            return self.circuit(params, mode='eval')
 
-        grads = jax.grad(model)(self.params)
-        grads_e = np.abs(grads['e'])
-        
+        dev = qml.device(self.device_name, wires=self.n_qubits)
+        diff_method = 'adjoint' if self.device_name == 'lightning.gpu' else 'backprop'
+
+        @qml.qnode(dev, interface='jax', diff_method=diff_method)
+        def model(params_e, params_t):
+            return self.circuit(params_e, params_t, mode='eval')
+
+        # Compute gradients only with respect to 'e' parameters (argnum=0)
+        grads_e_val = jax.grad(model, argnums=0)(self.params['e'], self.params['t'])
+        grads_e = np.abs(np.array(grads_e_val))
+
         max_grad = np.max(grads_e)
         self.Ng = np.sum((grads_e >= max_grad * self.ratio) * (grads_e >= self.threshold1))
         selected_indices = np.argsort(grads_e)[::-1][:self.Ng].tolist()
@@ -322,28 +247,25 @@ class ADAPT:
 
         return selected_operator, selected_gates, max_grads, selected_indices
 
-    def circuit(self, params, mode='train'):
-        
+    def circuit(self, params_e, params_t, mode='train'):
+
         # prepare non-interacting ground state in k-space
         for q in self.spin_up_indices + self.spin_down_indices:
             qml.PauliX(wires=q)
-        
-        # circuit selected by algorithm
-        if mode == 'train' or mode == 'state':
-            for i, gate in enumerate(self.selected_gates):
-                gate(params['t'][i])
-            
-        elif mode == 'eval':
-            for i, gate in enumerate(self.selected_gates):
-                gate(params['t'][i])
 
+        # circuit selected by algorithm
+        if mode in ['train', 'state', 'all', 'eval']:
+            for i, gate in enumerate(self.selected_gates):
+                gate(params_t[i])
+
+        if mode == 'eval':
             for i, gate in enumerate(self.gateOperatorPool):
-                gate(params['e'][i])
+                gate(params_e[i])
 
         # apply the Fourier Transform back to the real space
         for i in range(self.n_qubits):
             qml.RZ(np.angle(self.diagonal[i]), wires=i)
-            
+
         for parallel_ops in self.circuit_description:
             for op in parallel_ops:
                 if op == 'pht':
@@ -352,133 +274,129 @@ class ADAPT:
                     i, j, theta, phi = op
                     qml.SingleExcitation(2 * theta, wires=[i, j])
                     qml.RZ(phi, wires=j)
-        
+
         if mode == 'train':
             return qml.expval(self.qmlHamiltonian), qml.expval(self.qmlOperators['Sz']), qml.expval(self.qmlOperators['S^2'])
         elif mode == 'state':
             return qml.state()
         elif mode == 'eval':
             return qml.expval(self.qmlHamiltonian)
+        elif mode == 'all':
+            return qml.expval(self.qmlHamiltonian), qml.expval(self.qmlOperators['Sz']), qml.expval(self.qmlOperators['S^2']), qml.state()
+
+    def _setup_qnodes(self, dev, diff_method):
+        """Helper to setup QNodes based on the differentiation method."""
+        if diff_method == 'backprop':
+            @qml.qnode(dev, interface='jax')
+            def full_qnode(p_e, p_t):
+                return self.circuit(p_e, p_t, mode='all')
+
+            # Use general metric_tensor for robustness
+            mt_fn = qml.metric_tensor(full_qnode, approx="block-diag", argnums=1) if self.use_qng else None
+
+            def step_fn(params):
+                def loss_fn(p_t):
+                    res = full_qnode(params['e'], p_t)
+                    return res[0], (res[1], res[2], res[3])
+                (loss, (Sz, S_square, state)), grads_t = jax.value_and_grad(loss_fn, has_aux=True)(params['t'])
+                return loss, Sz, S_square, state, grads_t, mt_fn
+        else:
+            @qml.qnode(dev, interface='jax', diff_method='adjoint')
+            def train_qnode(p_e, p_t):
+                return self.circuit(p_e, p_t, mode='train')
+            @qml.qnode(dev, interface='jax', diff_method=None)
+            def state_qnode(p_e, p_t):
+                return self.circuit(p_e, p_t, mode='state')
+            
+            # For lightning.gpu, we need a QNode without diff_method='adjoint' for the metric tensor
+            @qml.qnode(dev, interface='jax')
+            def mt_qnode(p_e, p_t):
+                return self.circuit(p_e, p_t, mode='train')
+
+            mt_fn = qml.metric_tensor(mt_qnode, approx="block-diag", argnums=1) if self.use_qng else None
+
+            def step_fn(params):
+                state = state_qnode(params['e'], params['t'])
+                def loss_fn(p_t):
+                    res = train_qnode(params['e'], p_t)
+                    return res[0], (res[1], res[2])
+                (loss, (Sz, S_square)), grads_t = jax.value_and_grad(loss_fn, has_aux=True)(params['t'])
+                return loss, Sz, S_square, state, grads_t, mt_fn
+        return step_fn
 
     def run(self):
-        
         self.get_ground_state_properties()
-
         start_time = time.time()
-        fig = plt.figure(figsize=(12, 6))
-        ax1 = fig.add_subplot(1, 2, 1)
-        ax2 = fig.add_subplot(1, 2, 2)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
 
-        dev = qml.device('default.qubit', wires=self.n_qubits)
+        dev = qml.device(self.device_name, wires=self.n_qubits)
+        diff_method = 'adjoint' if self.device_name == 'lightning.gpu' else 'backprop'
 
-        i_epoch = len(self.results['epoch loss'])
-
-        while i_epoch < self.n_epoch:
-            
+        while len(self.results['epoch loss']) < self.n_epoch:
+            i_epoch = len(self.results['epoch loss'])
             print(f"\n{'='*20} Epoch {i_epoch + 1} {'='*20}")
+
             print(">>> Phase 1: Operator Selection")
-            selected_operators, selected_gates, max_grads, selected_indices = self.select_operator()
-            if len(max_grads) == 0:
-                print('>>> Convergence criterion satisfied, ending optimization.')
-                break
-            
-            self.selected_gates += selected_gates
-            self.selected_indices += selected_indices
+            sel_ops, sel_gates, max_grads, sel_indices = self.select_operator()
+            if not max_grads: break
+
+            self.selected_gates += sel_gates
+            self.selected_indices += sel_indices
             self.params['t'] = jnp.concatenate([self.params['t'], jnp.zeros(self.Ng)])
-            self.results['selected operators'] += selected_operators
+            self.results['selected operators'] += sel_ops
             self.results['n_params'].append(len(self.results['selected operators']))
+
             lr = float(np.linalg.norm(max_grads) / np.sqrt(self.Ng) * 0.05)
-            
-            # Use optax optimizer
             optimizer = optax.adam(lr)
             opt_state = optimizer.init(self.params)
 
-            print(f">>> Found {len(selected_operators)} new operators. Total parameters: {len(self.params['t'])}")
-            print(f">>> Learning rate: {lr:.6f}")
+            print(f">>> Found {len(sel_ops)} new operators. Total parameters: {len(self.params['t'])}")
+            print(f">>> Learning rate: {lr:.6f} | Use QNG: {self.use_qng}")
             print(">>> Phase 2: Parameter Optimization")
-            
-            # Define QNodes once per epoch since the circuit structure is now fixed for this epoch
-            @jax.jit
-            @qml.qnode(dev, interface='jax', diff_method='backprop')
-            def train_circuit(p):
-                return self.circuit(p, mode='train')
-            
-            @jax.jit
-            @qml.qnode(dev, interface='jax', diff_method='backprop')
-            def state_circuit(p):
-                return self.circuit(p, mode='state')
-            
-            def loss_fn(p):
-                res = train_circuit(p)
-                return res[0], (res[1], res[2])
 
-            def train_step(params, opt_state):
-                (loss, (Sz, S_square)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
-                updates, opt_state = optimizer.update(grads, opt_state)
-                params = optax.apply_updates(params, updates)
-                return params, opt_state, loss, Sz, S_square, grads
+            step_fn = self._setup_qnodes(dev, diff_method)
 
             while True:
-                
-                state = state_circuit(self.params)
+                loss, Sz, S_square, state, grads_t, mt_fn = step_fn(self.params)
                 fidelity = self.calculate_fidelity(state)
-                
-                self.params, opt_state, loss, Sz, S_square, grads = train_step(self.params, opt_state)
+
+                grads = {'e': jnp.zeros_like(self.params['e']), 't': grads_t}
+                if self.use_qng:
+                    mt = mt_fn(self.params['e'], self.params['t'])
+                    grads['t'] = jnp.linalg.solve(mt + self.qng_reg * jnp.eye(mt.shape[0]), grads['t'])
+
+                updates, opt_state = optimizer.update(grads, opt_state)
+                self.params = optax.apply_updates(self.params, updates)
+
+                # Logging
+                iter_idx = len(self.results['iteration loss']) + 1
+                log_str = (f"Iter: {iter_idx:4d} | Energy: {float(loss):.8f} | "
+                           f"Grad Norm: {float(jnp.linalg.norm(grads['t'])):.6f} | "
+                           f"Fidelity: {float(fidelity):.6f} | Sz: {float(Sz):.6f} | S^2: {float(S_square):.6f}")
+                print(log_str)
+                with open(self.log_filepath, 'a') as f: f.write(log_str + '\n')
 
                 self.results['iteration loss'].append(float(loss))
                 self.results['Sz'].append(float(Sz))
                 self.results['S^2'].append(float(S_square))
                 self.results['fidelity'].append(float(fidelity))
 
-                # Calculate grad norm for 't' parameters
-                grad_norm = float(jnp.linalg.norm(grads['t']))
+                if float(jnp.linalg.norm(grads['t'])) < self.threshold2: break
 
-                log_str = (f"Iter: {len(self.results['iteration loss']):4d} | "
-                           f"Energy: {float(loss):.8f} | "
-                           f"Grad Norm: {grad_norm:.6f} | "
-                           f"Fidelity: {float(fidelity):.6f} | "
-                           f"Sz: {float(Sz):.6f} | "
-                           f"S^2: {float(S_square):.6f}")
-                print(log_str)
-                
-                with open(self.log_filepath, 'a') as f:
-                    f.write(log_str + '\n')
-
-                if grad_norm < self.threshold2:
-                    print(f">>> Optimization for Epoch {i_epoch + 1} finished (Grad Norm < {self.threshold2})")
-                    break
-            
             self.results['epoch loss'].append(self.results['iteration loss'][-1])
-            i_epoch += 1
-            print('')
-
-            #############################
-            
             self.save_model()
 
-            ax1.clear()
-            length = len(self.results['iteration loss'])
-            ax1.plot(np.arange(length)+1, self.results['iteration loss'], color='coral', marker='X', ls='--', label='ADAPT')
-            ax1.plot(np.arange(length)+1, np.full(length, self.ground_state_energy), color='violet', label='ED')
-            ax1.set_xlabel('iteration')
-            ax1.set_ylabel('energy')
-            ax1.legend()
-            ax1.grid()
-            
-            ax2.clear()
-            length = len(self.results['epoch loss'])
-            ax2.plot(np.arange(length)+1, self.results['epoch loss'], color='yellowgreen', marker='X', ls='--', label='ADAPT')
-            ax2.plot(np.arange(length)+1, np.full(length, self.ground_state_energy), color='violet', label='ED')
-            ax2.set_xlabel('epoch')
-            ax2.set_ylabel('energy')
-            ax2.legend()
-            ax2.grid()
-
+            # Plotting
+            for ax, data, label, color in zip([ax1, ax2], 
+                                              [self.results['iteration loss'], self.results['epoch loss']], 
+                                              ['iteration', 'epoch'], ['coral', 'yellowgreen']):
+                ax.clear()
+                ax.plot(np.arange(len(data))+1, data, color=color, marker='X', ls='--', label='ADAPT')
+                ax.axhline(self.ground_state_energy, color='violet', label='ED')
+                ax.set_xlabel(label); ax.set_ylabel('energy'); ax.legend(); ax.grid()
             plt.savefig(self.img_filepath)
-        
-        end_time = time.time()
 
-        print('total run time: ', end_time - start_time)
+        print('Total run time: ', time.time() - start_time)
         
 
 if __name__ == '__main__':
@@ -493,7 +411,9 @@ if __name__ == '__main__':
         n_spin_down=4,
         tunneling=1,
         coulomb=2,
-        load_model=False
+        load_model=False,
+        device='lightning.gpu',  # Uncomment to use cuQuantum and Adjoint Differentiation for 16+ qubits
+        use_qng=True,
     )
     # vqe.get_ground_state_properties()
     vqe.run()
